@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "local_filesystem": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "mcp_servers.filesystem.server"],
+      "enabled": true
+    },
+    "internal_database": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "mcp_servers.database.server"],
+      "enabled": true
+    },
+    "github-Ai-Chief-Of-Staff": {
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PAT}"
+      },
+      "url": "https://api.githubcopilot.com/mcp/"
+    }
+  }
+}

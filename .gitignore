@@ -1,0 +1,62 @@
+# Environments
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# Testing & Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+coverage/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local Storage
+storage/blobs/
+storage/staging/
+storage/*.json
+storage/**/*.json
+Videos/

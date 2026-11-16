@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+node_modules
+dist
+build
+.venv
+venv
+storage/blobs
+storage/staging

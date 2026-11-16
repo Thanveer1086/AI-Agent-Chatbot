@@ -1,0 +1,73 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: agent_chatbot_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agent_chatbot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/src/core/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agent_chatbot_backend
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/agent_chatbot
+      - API_USED=${API_USED:-gemini}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-gemini}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-2}
+      - GITHUB_PAT=${GITHUB_PAT:-}
+      - GITHUB_USERNAME=${GITHUB_USERNAME:-Thanveer1086}
+      - DEV_AUTH_BYPASS=true
+      - JWT_SECRET=${JWT_SECRET:-super-secret-key-change-in-prod}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./storage:/app/storage
+      - ./backend/src:/app/src
+      - ./mcp_config.json:/app/mcp_config.json
+      - ./mcp_servers:/app/mcp_servers
+      - ./.env:/app/.env
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: agent_chatbot_frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  adminer:
+    image: adminer:latest
+    container_name: agent_chatbot_adminer
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
