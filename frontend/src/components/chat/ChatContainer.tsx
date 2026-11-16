@@ -13,18 +13,23 @@ import {
   Copy,
   Check,
   Square,
-  ArrowDown
+  ArrowDown,
+  Mic,
+  MicOff,
+  Download
 } from 'lucide-react';
 import { useSSEChat } from '../../hooks/useSSEChat';
 import { ThoughtAccordion } from './ThoughtAccordion';
 import { CitationDrawer } from './CitationDrawer';
 import { ChatSidebar } from './ChatSidebar';
+import { CodeBlock } from './CodeBlock';
 
 export const ChatContainer: React.FC = () => {
   const [input, setInput] = useState<string>('');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [isNearBottom, setIsNearBottom] = useState<boolean>(true);
+  const [isListening, setIsListening] = useState<boolean>(false);
 
   const {
     messages,
@@ -45,6 +50,7 @@ export const ChatContainer: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef<boolean>(true);
+  const recognitionRef = useRef<any>(null);
 
   // Monitor scroll position to enable/disable auto-scroll
   const handleScroll = useCallback(() => {
@@ -77,6 +83,108 @@ export const ChatContainer: React.FC = () => {
     }, 2000);
   };
 
+  // Voice Input Speech-to-Text Handler
+  const toggleListening = () => {
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert('Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.');
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event: any) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        if (transcript) {
+          setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.error('Speech recognition exception:', err);
+      setIsListening(false);
+    }
+  };
+
+  // Export Chat Conversation as Markdown (.md)
+  const exportChatToMarkdown = () => {
+    if (messages.length === 0) return;
+    const currentSession = sessions.find((s) => s.id === sessionId);
+    const title = currentSession?.title || 'Chat Conversation';
+    const timestamp = new Date().toLocaleString();
+
+    let md = `# ${title}\n\n`;
+    md += `*Exported on: ${timestamp}*\n\n---\n\n`;
+
+    messages.forEach((msg) => {
+      const roleName = msg.role === 'user' ? '👤 User' : '🤖 Assistant';
+      md += `### ${roleName}\n\n`;
+
+      if (msg.role === 'assistant' && msg.thoughts && msg.thoughts.length > 0) {
+        md += `<details>\n<summary>Thinking Process (${msg.thoughts.length} steps)</summary>\n\n`;
+        msg.thoughts.forEach((t) => {
+          md += `- **${t.step_title}**: ${t.description}\n`;
+        });
+        md += `\n</details>\n\n`;
+      }
+
+      md += `${msg.content}\n\n`;
+
+      if (msg.citations && msg.citations.length > 0) {
+        md += `**Sources:**\n`;
+        msg.citations.forEach((cit) => {
+          md += `- **${cit.document_name}** (${Math.round(cit.confidence_score * 100)}% match)\n`;
+        });
+        md += `\n`;
+      }
+
+      md += `---\n\n`;
+    });
+
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const safeFilename = title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 32);
+    link.download = `${safeFilename || 'chat_export'}_${Date.now()}.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const submitFeedback = async (messageId: string, rating: 'satisfactory' | 'unsatisfactory') => {
     try {
       await fetch('/api/submit/feedback', {
@@ -92,14 +200,19 @@ export const ChatContainer: React.FC = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    }
     if (input.trim() && !isStreaming) {
       sendMessage(input.trim());
       setInput('');
-      // Force scroll to bottom on new message submission
       isAtBottomRef.current = true;
       setTimeout(scrollToBottom, 50);
     }
   };
+
+  const currentSession = sessions.find((s) => s.id === sessionId);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden bg-slate-50">
@@ -117,6 +230,29 @@ export const ChatContainer: React.FC = () => {
 
       {/* Main Chat Flow */}
       <div className="relative flex flex-1 flex-col h-full overflow-hidden bg-slate-50">
+        {/* Top Chat Bar: Session Title & Export Action */}
+        {messages.length > 0 && (
+          <div className="flex items-center justify-between border-b border-slate-200/80 bg-white/70 px-6 py-2.5 backdrop-blur-xs text-xs">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-slate-700 truncate max-w-md">
+                {currentSession?.title || 'Current Conversation'}
+              </span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">
+                {messages.length} messages
+              </span>
+            </div>
+
+            <button
+              onClick={exportChatToMarkdown}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-colors shadow-2xs"
+              title="Download conversation as Markdown report"
+            >
+              <Download className="h-3.5 w-3.5 text-blue-600" />
+              <span>Export Chat (.md)</span>
+            </button>
+          </div>
+        )}
+
         {/* Messages Scroll Area */}
         <div
           ref={scrollContainerRef}
@@ -183,9 +319,14 @@ export const ChatContainer: React.FC = () => {
                       <ThoughtAccordion thoughts={msg.thoughts} toolTraces={msg.tool_traces} />
                     )}
 
-                    {/* Message Content */}
+                    {/* Message Content with CodeBlock syntax highlighting */}
                     <div className="prose prose-sm max-w-none prose-slate">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          code: (props) => <CodeBlock {...props} />,
+                        }}
+                      >
                         {msg.content || (isStreaming ? '...' : '')}
                       </ReactMarkdown>
                     </div>
@@ -285,10 +426,31 @@ export const ChatContainer: React.FC = () => {
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask a question or request an action..."
+              placeholder={isListening ? "Listening... Speak now..." : "Ask a question or request an action..."}
               disabled={isStreaming}
-              className="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900 shadow-2xs focus:border-blue-500 focus:bg-white focus:outline-hidden disabled:opacity-50"
+              className={`flex-1 rounded-xl border px-4 py-3 text-sm text-slate-900 shadow-2xs focus:outline-hidden disabled:opacity-50 transition-all ${
+                isListening
+                  ? 'border-rose-400 bg-rose-50/50 ring-2 ring-rose-300'
+                  : 'border-slate-300 bg-slate-50 focus:border-blue-500 focus:bg-white'
+              }`}
             />
+
+            {/* Voice Input Microphone Button */}
+            <button
+              type="button"
+              onClick={toggleListening}
+              disabled={isStreaming}
+              className={`flex h-11 w-11 items-center justify-center rounded-xl transition-all shadow-xs ${
+                isListening
+                  ? 'bg-rose-500 text-white animate-pulse shadow-md hover:bg-rose-600'
+                  : 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 hover:text-slate-800'
+              }`}
+              title={isListening ? 'Stop listening' : 'Voice input (Speech to text)'}
+            >
+              {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+            </button>
+
+            {/* Send or Stop Generation Button */}
             {isStreaming ? (
               <button
                 type="button"

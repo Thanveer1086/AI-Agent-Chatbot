@@ -60,3 +60,7 @@ storage/staging/
 storage/*.json
 storage/**/*.json
 Videos/
+
+# Database Backups
+backups/
+*.sql.gz
