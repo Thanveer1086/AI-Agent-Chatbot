@@ -33,6 +33,7 @@ TOOLS = [
     {
         "name": "list_staging_files",
         "description": "Lists all staged knowledge files waiting for or completed in processing.",
+        "annotations": {"readOnlyHint": True},
         "inputSchema": {
             "type": "object",
             "properties": {"subpath": {"type": "string", "default": ""}},
@@ -41,6 +42,7 @@ TOOLS = [
     {
         "name": "read_staged_file",
         "description": "Reads lines from a staged text or log file.",
+        "annotations": {"readOnlyHint": True},
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -11,6 +11,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 
 from src.config import settings
 from src.core import llm
+from src.core.agent.approvals import create_pending_approval
 from src.core.agent.state import AgentState, ThoughtStepRecord
 from src.core.db.session import db_manager
 from src.core.mcp.executor import execute_tools_parallel
@@ -276,7 +277,42 @@ async def tool_executor_node(state: AgentState) -> Dict[str, Any]:
     if not queue:
         return {"status": "reflecting"}
 
-    records, new_citations = await execute_tools_parallel(queue)
+    # Tools that can change things are never run by the agent itself: they are stored
+    # as pending approvals and shown to the user, who decides in the chat.
+    runnable, held = [], []
+    for call in queue:
+        if call["name"].startswith("mcp_") and mcp_manager.requires_approval(call["name"]):
+            held.append(call)
+        else:
+            runnable.append(call)
+
+    records, new_citations = await execute_tools_parallel(runnable) if runnable else ([], [])
+
+    for call in held:
+        try:
+            approval_id = await create_pending_approval(
+                state.get("session_id", ""), state.get("user_id", ""), call["name"], call["arguments"],
+                reason=str(state["messages"][-1].content)[:500] if state.get("messages") else None,
+            )
+            records.append({
+                "call_id": call["call_id"],
+                "tool_name": call["name"],
+                "arguments": call["arguments"],
+                "output": "NOT EXECUTED: this action changes data and is waiting for the user's approval.",
+                "latency_ms": 0.0,
+                "status": "pending_approval",
+                "approval_id": approval_id,
+            })
+        except Exception as e:
+            logger.error(f"Could not create approval request for {call['name']}: {e}")
+            records.append({
+                "call_id": call["call_id"],
+                "tool_name": call["name"],
+                "arguments": call["arguments"],
+                "output": f"NOT EXECUTED: the approval request could not be created ({e}).",
+                "latency_ms": 0.0,
+                "status": "error",
+            })
 
     # tool_execution_history and citations use an `operator.add` reducer, so only the
     # NEW items are returned; returning old + new would duplicate every earlier entry.
@@ -293,6 +329,12 @@ async def reflection_node(state: AgentState) -> Dict[str, Any]:
     iteration = state.get("iteration_count", 1)
     history = state.get("tool_execution_history", [])
     messages = list(state.get("messages", []))
+
+    if any(h.get("status") == "pending_approval" for h in history):
+        return {
+            "intermediate_thoughts": [_thought(iteration + 1, "An action needs the user's approval before it can run. Pausing and asking the user.")],
+            "status": "answering"
+        }
 
     if iteration >= settings.MAX_AGENT_ITERATIONS or not history:
         return {
@@ -375,7 +417,11 @@ async def answer_node(state: AgentState) -> Dict[str, Any]:
         for h in history
         if h["status"] == "success" and "No matching documents" not in str(h["output"])
     ]
-    errors = [f"{h['tool_name']}: {str(h['output'])[:300]}" for h in history if h["status"] != "success"]
+    errors = [f"{h['tool_name']}: {str(h['output'])[:300]}" for h in history if h["status"] not in ("success", "pending_approval")]
+    pending = [
+        f"{h['tool_name']} with arguments {json.dumps(h.get('arguments', {}), default=str)[:400]}"
+        for h in history if h["status"] == "pending_approval"
+    ]
     passages = "\n\n".join(evidence)
     raw_passages = "\n\n".join(
         str(h["output"]) for h in history
@@ -385,6 +431,9 @@ async def answer_node(state: AgentState) -> Dict[str, Any]:
     user_content = (
         f"Context:\n{passages if passages else 'None'}\n\n"
         + (f"Tool errors:\n" + "\n".join(errors) + "\n\n" if errors else "")
+        + ("Actions prepared but NOT executed (waiting for the user's approval):\n" + "\n".join(pending)
+           + "\nTell the user exactly what each action will do and ask them to press Approve or Reject on "
+             "the approval card below. Do NOT say the action was done.\n\n" if pending else "")
         + f"User Question: {last_user_msg}"
     )
     llm_messages = _history_as_messages(messages) + [{"role": "user", "content": user_content}]

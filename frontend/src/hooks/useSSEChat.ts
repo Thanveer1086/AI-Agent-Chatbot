@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { ChatMessage, Citation, ThoughtStep, ToolTrace, ChatSession } from '../types/chat';
-import { apiFetch } from '../lib/api';
+import { ChatMessage, Citation, ThoughtStep, ToolTrace, ChatSession, ToolApproval, ApprovalStatus } from '../types/chat';
+import { apiFetch, errorMessage } from '../lib/api';
 
 export function useSSEChat(applicationId: number = 1) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -227,6 +227,23 @@ export function useSSEChat(applicationId: number = 1) {
                   };
                 }
 
+                if (eventType === 'approval_required') {
+                  const approval: ToolApproval = {
+                    approval_id: data.approval_id,
+                    tool_name: data.tool_name,
+                    title: data.title,
+                    description: data.description,
+                    server: data.server,
+                    destructive: data.destructive,
+                    arguments: data.arguments || {},
+                    status: 'pending',
+                  };
+                  return {
+                    ...msg,
+                    approvals: [...(msg.approvals || []), approval],
+                  };
+                }
+
                 if (eventType === 'citation') {
                   const citation: Citation = {
                     document_name: data.document_name,
@@ -294,7 +311,63 @@ export function useSSEChat(applicationId: number = 1) {
     }
   }, [applicationId, isStreaming, sessionId, fetchSessions]);
 
+  // Approve or reject a tool call the agent paused on. Returns an error message, or null on success.
+  const decideApproval = useCallback(
+    async (approvalId: string, decision: 'approve' | 'reject'): Promise<string | null> => {
+      const setApprovalStatus = (status: ApprovalStatus, result?: string | null) =>
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.approvals?.some((a) => a.approval_id === approvalId)
+              ? {
+                  ...msg,
+                  approvals: msg.approvals.map((a) =>
+                    a.approval_id === approvalId ? { ...a, status, result: result ?? a.result } : a
+                  ),
+                }
+              : msg
+          )
+        );
+
+      if (decision === 'approve') setApprovalStatus('executing');
+      try {
+        const res = await apiFetch(`/api/tools/approvals/${approvalId}/${decision}`, { method: 'POST' });
+        if (!res.ok) {
+          const msg = await errorMessage(res);
+          // Re-sync with the server's view (it may already be decided or expired)
+          const list = await apiFetch('/api/tools/approvals');
+          if (list.ok) {
+            const { approvals } = await list.json();
+            const current = (approvals as ToolApproval[]).find((a) => a.approval_id === approvalId);
+            if (current) setApprovalStatus(current.status, current.result);
+          }
+          return msg;
+        }
+        const data = await res.json();
+        setApprovalStatus(data.approval.status, data.approval.result);
+        if (data.message) {
+          const outcome: ChatMessage = {
+            id: data.message.id,
+            role: 'assistant',
+            content: data.message.content,
+            thoughts: [],
+            tool_traces: [],
+            citations: [],
+            created_at: new Date().toISOString(),
+          };
+          setMessages((prev) => [...prev, outcome]);
+        }
+        return null;
+      } catch (err) {
+        console.error('Approval request failed:', err);
+        setApprovalStatus('pending');
+        return 'Network error. Please try again.';
+      }
+    },
+    []
+  );
+
   return {
+    decideApproval,
     messages,
     isStreaming,
     activeCitation,

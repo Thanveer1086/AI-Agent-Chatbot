@@ -1,5 +1,6 @@
 """LangGraph Agent State and Trace Definitions."""
 from typing import Annotated, Sequence, TypedDict, List, Dict, Any, Optional
+from typing_extensions import NotRequired
 from langchain_core.messages import BaseMessage
 import operator
 from datetime import datetime
@@ -10,7 +11,8 @@ class ToolCallRecord(TypedDict):
     arguments: Dict[str, Any]
     output: Any
     latency_ms: float
-    status: str  # "success" | "error" | "timeout"
+    status: str  # "success" | "error" | "timeout" | "pending_approval"
+    approval_id: NotRequired[str]
 
 class CitationRecord(TypedDict):
     document_name: str
@@ -26,6 +28,7 @@ class ThoughtStepRecord(TypedDict):
 
 class AgentState(TypedDict):
     session_id: str
+    user_id: str
     application_id: int
     application_name: str
     messages: Annotated[Sequence[BaseMessage], operator.add]

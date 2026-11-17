@@ -42,6 +42,7 @@ The spec-driven commands are installed in `.claude/skills/`:
 | Upload pipeline | `backend/src/core/rag/file_service.py` |
 | Guardrails, redaction, untrusted-data fencing | `backend/src/core/security/guardrails.py` |
 | Safe filenames and path containment | `backend/src/core/security/paths.py` |
+| Tool approval gate (human-in-the-loop) | `backend/src/core/agent/approvals.py`, `src/api/routes_approvals.py` |
 | Frontend API calls (adds Bearer token) | `frontend/src/lib/api.ts` |
 
 ## Coding conventions
@@ -54,6 +55,11 @@ The spec-driven commands are installed in `.claude/skills/`:
 - **Frontend:** use `apiFetch()` from `src/lib/api.ts`, never bare `fetch('/api/...')`.
 - **LangGraph reducers:** `tool_execution_history`, `citations` and `intermediate_thoughts` use
   `operator.add`. Nodes must return **only new items**, never old + new.
+- **Tools that change things need human approval.** `mcp_manager.requires_approval()` holds any
+  MCP tool not annotated `readOnlyHint: true` (or listed in the server's `auto_approve` config).
+  The executor stores it in `tool_approvals` (`src/core/agent/approvals.py`); it runs only via
+  `POST /api/tools/approvals/{id}/approve`. Never bypass this; new local MCP tools that only read
+  must declare `"annotations": {"readOnlyHint": true}`.
 - **Streaming tokens** are sent from the answer node with `get_stream_writer()`; the route
   redacts them with `StreamingRedactor`.
 

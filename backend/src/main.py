@@ -10,6 +10,7 @@ from src.api.routes_chat import router as chat_router
 from src.api.routes_files import router as files_router
 from src.api.routes_admin import router as admin_router
 from src.api.routes_mcp import router as mcp_router
+from src.api.routes_approvals import router as approvals_router
 from src.core.mcp.manager import mcp_manager
 from src.core.rag.reranker import reranker
 
@@ -72,6 +73,7 @@ app.include_router(chat_router)
 app.include_router(files_router)
 app.include_router(admin_router)
 app.include_router(mcp_router)
+app.include_router(approvals_router)
 
 @app.get("/health", tags=["Health"])
 async def health_check():

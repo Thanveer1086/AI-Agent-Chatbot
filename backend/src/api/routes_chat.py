@@ -17,6 +17,8 @@ from src.core.security.guardrails import (
     validate_input_query,
 )
 from src.core.agent.graph import agent_app
+from src.core.agent.approvals import get_approvals
+from src.core.mcp.manager import mcp_manager
 from src.core.db.session import db_manager
 
 logger = logging.getLogger(__name__)
@@ -117,6 +119,7 @@ async def stream_agent_execution(
     # 3. Stream Graph Execution
     initial_state = {
         "session_id": session_id,
+        "user_id": user.user_id,
         "application_id": request.application_id,
         "application_name": "General Knowledge",
         "messages": conversation_history,
@@ -168,6 +171,15 @@ async def stream_agent_execution(
                         tools_emitted.add(record["call_id"])
                         tools_collected.append(record)
                         yield sse("tool_result", {**record, "output": sanitize_output_text(str(record["output"]))})
+                        if record.get("status") == "pending_approval" and record.get("approval_id"):
+                            yield sse("approval_required", {
+                                "approval_id": record["approval_id"],
+                                "call_id": record["call_id"],
+                                "tool_name": record["tool_name"],
+                                "arguments": record["arguments"],
+                                "status": "pending",
+                                **mcp_manager.describe_tool(record["tool_name"]),
+                            })
 
                 for cit in node_output.get("citations", []):
                     key = cit.get("chunk_id") or json.dumps(cit, sort_keys=True, default=str)
@@ -277,8 +289,18 @@ async def get_session_messages(
             ORDER BY created_at ASC;
         """, str(session_id))
 
+    # Current state of any approval requests referenced by these messages
+    approval_ids = [
+        t["approval_id"] for r in rows for t in _parse_json(r["tool_calls"])
+        if isinstance(t, dict) and t.get("approval_id")
+    ]
+    approvals_by_id = {}
+    if approval_ids:
+        approvals_by_id = {a["approval_id"]: a for a in await get_approvals(user.user_id, ids=approval_ids)}
+
     result = []
     for r in rows:
+        tool_calls = _parse_json(r["tool_calls"])
         result.append({
             "id": str(r["id"]),
             "role": r["role"],
@@ -292,7 +314,11 @@ async def get_session_messages(
                     "duration_ms": t.get("latency_ms"),
                     "summary": str(t.get("output", ""))[:100] + ("..." if len(str(t.get("output", ""))) > 100 else "")
                 }
-                for t in _parse_json(r["tool_calls"])
+                for t in tool_calls
+            ],
+            "approvals": [
+                approvals_by_id[t["approval_id"]] for t in tool_calls
+                if isinstance(t, dict) and t.get("approval_id") in approvals_by_id
             ],
             "citations": _parse_json(r["citations"]),
             "created_at": r["created_at"].isoformat() if r["created_at"] else None

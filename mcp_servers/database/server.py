@@ -15,6 +15,7 @@ TOOLS = [
     {
         "name": "query_master_data",
         "description": "Returns list of active business application domains and categories in the database.",
+        "annotations": {"readOnlyHint": True},
         "inputSchema": {
             "type": "object",
             "properties": {"include_categories": {"type": "boolean", "default": True}},
@@ -23,6 +24,7 @@ TOOLS = [
     {
         "name": "get_system_metrics",
         "description": "Returns counts of indexed knowledge documents and total vector chunks.",
+        "annotations": {"readOnlyHint": True},
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]

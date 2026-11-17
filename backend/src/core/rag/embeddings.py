@@ -56,8 +56,17 @@ async def _embed_batch(texts: List[str]) -> List[List[float]]:
 
     if settings.GEMINI_API_KEY and (settings.EMBEDDING_PROVIDER == "gemini" or not settings.OPENAI_API_KEY):
         try:
+            from google.genai import types
             model = settings.EMBEDDING_MODEL if "gemini" in settings.EMBEDDING_MODEL else "gemini-embedding-2"
-            response = await gemini_client().aio.models.embed_content(model=model, contents=texts)
+            # Each text must be its own Content: a plain list[str] is treated as ONE
+            # multi-part input and returns a single embedding.
+            # output_dimensionality asks Gemini for 1536 values directly; this matches
+            # slicing the 3072-dim vector (verified cosine 1.0), so stored vectors stay valid.
+            response = await gemini_client().aio.models.embed_content(
+                model=model,
+                contents=[types.Content(parts=[types.Part(text=t)]) for t in texts],
+                config=types.EmbedContentConfig(output_dimensionality=settings.EXPECTED_EMBEDDING_DIM),
+            )
             if len(response.embeddings) != len(texts):
                 raise EmbeddingUnavailableError(
                     f"Gemini returned {len(response.embeddings)} embeddings for {len(texts)} inputs"

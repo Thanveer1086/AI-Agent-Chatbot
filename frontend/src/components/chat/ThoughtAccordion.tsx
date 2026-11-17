@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, BrainCircuit, Wrench, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, BrainCircuit, Wrench, CheckCircle2, AlertCircle, Loader2, ShieldAlert } from 'lucide-react';
 import { ThoughtStep, ToolTrace } from '../../types/chat';
 
 interface ThoughtAccordionProps {
@@ -68,6 +68,11 @@ export const ThoughtAccordion: React.FC<ThoughtAccordionProps> = ({ thoughts, to
                     )}
                     {trace.status === 'error' && (
                       <AlertCircle className="h-3 w-3 text-red-500" />
+                    )}
+                    {trace.status === 'pending_approval' && (
+                      <span className="flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                        <ShieldAlert className="h-3 w-3" /> awaiting approval
+                      </span>
                     )}
                     {trace.duration_ms !== undefined && (
                       <span className="text-[10px] text-slate-400 font-mono">

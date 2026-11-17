@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # Agent Guardrails (Constitution compliant)
     MAX_AGENT_ITERATIONS: int = Field(default=5, ge=1, le=10)
     TOOL_TIMEOUT_SECONDS: int = Field(default=15, ge=1, le=60)
+    # Human-in-the-loop: tools not marked read-only wait for the user's approval in the chat
+    TOOL_APPROVAL_REQUIRED: bool = True
+    APPROVAL_TTL_MINUTES: int = Field(default=30, ge=1, le=1440)
     RERANKING_ENABLED: bool = True
     # Discover MCP tools and load the reranker in the background at startup
     WARMUP_ON_STARTUP: bool = True

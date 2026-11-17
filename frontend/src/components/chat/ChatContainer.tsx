@@ -23,6 +23,7 @@ import { ThoughtAccordion } from './ThoughtAccordion';
 import { CitationDrawer } from './CitationDrawer';
 import { ChatSidebar } from './ChatSidebar';
 import { CodeBlock } from './CodeBlock';
+import { ApprovalCard } from './ApprovalCard';
 import { apiFetch, errorMessage } from '../../lib/api';
 
 export const ChatContainer: React.FC = () => {
@@ -46,6 +47,7 @@ export const ChatContainer: React.FC = () => {
     deleteSession,
     renameSession,
     stopStreaming,
+    decideApproval,
   } = useSSEChat(1);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -336,6 +338,12 @@ export const ChatContainer: React.FC = () => {
                         {msg.content || (isStreaming ? '...' : '')}
                       </ReactMarkdown>
                     </div>
+
+                    {/* Human-in-the-loop approvals for write/destructive tools */}
+                    {msg.role === 'assistant' &&
+                      msg.approvals?.map((approval) => (
+                        <ApprovalCard key={approval.approval_id} approval={approval} onDecide={decideApproval} />
+                      ))}
 
                     {/* Assistant Action Bar: Copy + Sources + Feedback */}
                     {msg.role === 'assistant' && (

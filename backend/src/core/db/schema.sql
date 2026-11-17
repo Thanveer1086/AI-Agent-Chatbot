@@ -133,3 +133,19 @@ CREATE TABLE IF NOT EXISTS feedback_records (
     comment TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 6. Human-in-the-loop approvals for tools that change things (write / destructive tools)
+CREATE TABLE IF NOT EXISTS tool_approvals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL,
+    tool_name VARCHAR(255) NOT NULL,
+    arguments JSONB NOT NULL DEFAULT '{}',
+    reason TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending | executing | executed | failed | rejected | expired
+    result TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    decided_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_tool_approvals_user_status ON tool_approvals(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_tool_approvals_session ON tool_approvals(session_id);

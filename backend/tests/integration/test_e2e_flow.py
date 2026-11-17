@@ -104,3 +104,87 @@ def test_upload_rejects_unsupported_type(client):
     body = response.json()
     assert body["success"] is False
     assert "Unsupported file type" in body["message"]
+
+
+def _create_session_and_approval(client, tool_name, user_id="dev_admin_001", arguments=None):
+    """Insert a chat session and a pending approval directly (no LLM needed)."""
+    import json as _json
+    from src.core.db.session import db_manager
+
+    session_id, approval_id = str(uuid.uuid4()), str(uuid.uuid4())
+
+    async def insert():
+        async with db_manager.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO chat_sessions (id, user_id, application_id, title) VALUES ($1::uuid, $2, 1, 'approval test')",
+                session_id, user_id)
+            await conn.execute(
+                "INSERT INTO tool_approvals (id, session_id, user_id, tool_name, arguments) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb)",
+                approval_id, session_id, user_id, tool_name, _json.dumps(arguments or {}))
+
+    client.portal.call(insert)
+    return session_id, approval_id
+
+
+def _delete_session(client, session_id):
+    from src.core.db.session import db_manager
+
+    async def cleanup():
+        async with db_manager.acquire() as conn:
+            await conn.execute("DELETE FROM chat_sessions WHERE id = $1::uuid", session_id)
+
+    client.portal.call(cleanup)
+
+
+def test_approve_runs_tool_once_and_records_outcome(client):
+    # A read-only local tool is used so the test never changes anything external.
+    session_id, approval_id = _create_session_and_approval(client, "mcp_internal_database_get_system_metrics")
+    try:
+        client.get("/api/mcp/tools")  # make sure tools are discovered
+        res = client.post(f"/api/tools/approvals/{approval_id}/approve")
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["approval"]["status"] == "executed"
+        assert "total_chunks" in body["approval"]["result"]
+        assert body["message"]["content"].startswith("✅")
+
+        # A second click must not run it again
+        again = client.post(f"/api/tools/approvals/{approval_id}/approve")
+        assert again.status_code == 409
+
+        # The outcome is now part of the conversation
+        msgs = client.get(f"/api/chat/sessions/{session_id}/messages").json()
+        assert any("Approved action" in m["content"] for m in msgs)
+    finally:
+        _delete_session(client, session_id)
+
+
+def test_reject_never_runs_tool(client):
+    session_id, approval_id = _create_session_and_approval(
+        client, "mcp_github-Ai-Chief-Of-Staff_delete_file", arguments={"path": "README.md"})
+    try:
+        res = client.post(f"/api/tools/approvals/{approval_id}/reject")
+        assert res.status_code == 200
+        assert res.json()["approval"]["status"] == "rejected"
+        assert client.post(f"/api/tools/approvals/{approval_id}/approve").status_code == 409
+    finally:
+        _delete_session(client, session_id)
+
+
+def test_cannot_approve_someone_elses_request(client):
+    session_id, approval_id = _create_session_and_approval(
+        client, "mcp_github-Ai-Chief-Of-Staff_delete_file", user_id="someone_else")
+    try:
+        assert client.post(f"/api/tools/approvals/{approval_id}/approve").status_code == 404
+    finally:
+        _delete_session(client, session_id)
+
+
+def test_pending_approvals_are_listed(client):
+    session_id, approval_id = _create_session_and_approval(client, "mcp_github-Ai-Chief-Of-Staff_create_branch")
+    try:
+        res = client.get("/api/tools/approvals?status=pending")
+        assert res.status_code == 200
+        assert approval_id in [a["approval_id"] for a in res.json()["approvals"]]
+    finally:
+        _delete_session(client, session_id)

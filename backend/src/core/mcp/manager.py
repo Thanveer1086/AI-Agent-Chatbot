@@ -325,6 +325,36 @@ class MCPClientManager:
             logger.info(f"Discovered {len(discovered)} total MCP tools across servers.")
             return all_tools
 
+    # ------------------------------------------------------------- approval policy
+    def requires_approval(self, tool_name: str) -> bool:
+        """True if the tool may change something and must wait for the user's approval.
+
+        Safe by default: a tool runs automatically only when its server marks it
+        `annotations.readOnlyHint = true`, or the server config allows it explicitly
+        ("auto_approve": ["tool_a", ...]  or  "auto_approve": "all").
+        """
+        if not settings.TOOL_APPROVAL_REQUIRED:
+            return False
+        info = self.discovered_tools.get(tool_name)
+        if info is None:
+            return True
+        auto = info["config"].get("auto_approve")
+        if auto == "all" or (isinstance(auto, list) and info["tool_name"] in auto):
+            return False
+        annotations = info["original_tool"].get("annotations") or {}
+        return annotations.get("readOnlyHint") is not True
+
+    def describe_tool(self, tool_name: str) -> Dict[str, Any]:
+        info = self.discovered_tools.get(tool_name) or {}
+        orig = info.get("original_tool", {})
+        ann = orig.get("annotations") or {}
+        return {
+            "server": info.get("server_name"),
+            "title": ann.get("title") or orig.get("name") or tool_name,
+            "description": (orig.get("description") or "")[:300],
+            "destructive": bool(ann.get("destructiveHint")),
+        }
+
     # ------------------------------------------------------------- execution
     async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool via tools/call with human-friendly error translation and timeout protection."""
