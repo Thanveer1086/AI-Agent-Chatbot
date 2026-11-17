@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ShieldCheck, PlusCircle, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { apiFetch } from '../../lib/api';
 
 export const AnswerOverrideStudio: React.FC = () => {
   const [questionText, setQuestionText] = useState('');
@@ -15,7 +16,7 @@ export const AnswerOverrideStudio: React.FC = () => {
     setFeedback(null);
 
     try {
-      const resp = await fetch('/api/override_answer', {
+      const resp = await apiFetch('/api/override_answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

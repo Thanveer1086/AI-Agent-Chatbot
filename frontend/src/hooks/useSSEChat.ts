@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ChatMessage, Citation, ThoughtStep, ToolTrace, ChatSession } from '../types/chat';
+import { apiFetch } from '../lib/api';
 
 export function useSSEChat(applicationId: number = 1) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -13,7 +14,7 @@ export function useSSEChat(applicationId: number = 1) {
   // Fetch all chat sessions for this application
   const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch(`/api/chat/sessions?application_id=${applicationId}`);
+      const res = await apiFetch(`/api/chat/sessions?application_id=${applicationId}`);
       if (res.ok) {
         const data = await res.json();
         setSessions(data);
@@ -33,7 +34,7 @@ export function useSSEChat(applicationId: number = 1) {
     setSessionId(id);
     setIsLoadingHistory(true);
     try {
-      const res = await fetch(`/api/chat/sessions/${id}/messages`);
+      const res = await apiFetch(`/api/chat/sessions/${id}/messages`);
       if (res.ok) {
         const msgs = await res.json();
         setMessages(msgs);
@@ -56,7 +57,7 @@ export function useSSEChat(applicationId: number = 1) {
   const deleteSession = useCallback(async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
-      await fetch(`/api/chat/sessions/${id}`, { method: 'DELETE' });
+      await apiFetch(`/api/chat/sessions/${id}`, { method: 'DELETE' });
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (sessionId === id) {
         setSessionId(null);
@@ -71,7 +72,7 @@ export function useSSEChat(applicationId: number = 1) {
   const renameSession = useCallback(async (id: string, newTitle: string) => {
     if (!newTitle.trim()) return;
     try {
-      const res = await fetch(`/api/chat/sessions/${id}`, {
+      const res = await apiFetch(`/api/chat/sessions/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: newTitle.trim() }),
@@ -128,7 +129,7 @@ export function useSSEChat(applicationId: number = 1) {
     abortControllerRef.current = controller;
 
     try {
-      const response = await fetch('/api/chat/stream', {
+      const response = await apiFetch('/api/chat/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -245,6 +246,11 @@ export function useSSEChat(applicationId: number = 1) {
                     ...msg,
                     content: msg.content + data.text,
                   };
+                }
+
+                if (eventType === 'done' && data.message_id && msg.content) {
+                  // Switch to the server-side id so feedback and history refer to the stored message
+                  return { ...msg, id: data.message_id };
                 }
 
                 if (eventType === 'error') {

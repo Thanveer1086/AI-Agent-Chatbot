@@ -40,6 +40,11 @@ INSERT INTO document_types (id, name) VALUES
     (4, 'Technical Specification')
 ON CONFLICT (id) DO NOTHING;
 
+-- Seeds use explicit ids, so move the SERIAL counters past them; otherwise the next
+-- normal INSERT would try id 1 again and fail with a duplicate key error.
+SELECT setval(pg_get_serial_sequence('applications', 'id'), GREATEST((SELECT MAX(id) FROM applications), 1));
+SELECT setval(pg_get_serial_sequence('document_types', 'id'), GREATEST((SELECT MAX(id) FROM document_types), 1));
+
 -- 2. File & Ingestion Metadata
 CREATE TABLE IF NOT EXISTS uploaded_files (
     id SERIAL PRIMARY KEY,
@@ -119,7 +124,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     citations JSONB DEFAULT '[]',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session_time ON chat_messages(session_id, created_at);
 
 CREATE TABLE IF NOT EXISTS feedback_records (
     id SERIAL PRIMARY KEY,

@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Upload, FileText, CheckCircle2, AlertCircle, Loader2, Files } from 'lucide-react';
+import { apiFetch } from '../../lib/api';
 
 interface FileUploaderProps {
   onUploadSuccess: () => void;
@@ -43,7 +44,7 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onUploadSuccess }) =
       formData.append('document_type_id', '1');
 
       try {
-        const response = await fetch('/api/upload_file', {
+        const response = await apiFetch('/api/upload_file', {
           method: 'POST',
           body: formData,
         });
@@ -53,7 +54,7 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onUploadSuccess }) =
           successCount++;
           totalChunks += data.data.indexed_chunks || 0;
         } else {
-          errors.push(`${file.name}: ${data.message || 'Upload failed'}`);
+          errors.push(`${file.name}: ${data.message || data.detail || `Upload failed (HTTP ${response.status})`}`);
         }
       } catch (err: any) {
         errors.push(`${file.name}: ${err.message || 'Network error'}`);
@@ -134,7 +135,7 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onUploadSuccess }) =
           disabled={isUploading}
           onChange={(e) => e.target.files && handleFiles(e.target.files)}
           className="hidden"
-          accept=".pdf,.docx,.doc,.csv,.xlsx,.xls,.txt,.md"
+          accept=".pdf,.docx,.csv,.tsv,.xlsx,.txt,.md,.json"
         />
 
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 text-blue-600 mb-3 shadow-2xs">

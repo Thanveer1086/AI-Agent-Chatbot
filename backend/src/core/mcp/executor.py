@@ -1,5 +1,6 @@
 """Parallel Tool Execution Engine."""
 import asyncio
+import json
 import time
 import logging
 from typing import List, Dict, Any, Tuple
@@ -29,17 +30,13 @@ async def execute_single_tool(call_id: str, tool_name: str, arguments: Dict[str,
             }
             return record, citations
         elif tool_name.startswith("mcp_"):
-            # Ensure required query parameter for search_repositories is dynamically populated
-            default_user = mcp_manager.authenticated_user or getattr(settings, "GITHUB_USERNAME", "Thanveer1086")
-            if "search_repositories" in tool_name and not arguments.get("query"):
-                arguments["query"] = f"user:{default_user}"
-            elif "search_" in tool_name and "query" not in arguments:
-                arguments["query"] = f"user:{default_user}"
-
             res = await mcp_manager.execute_tool(tool_name, arguments)
             latency = (time.time() - start_time) * 1000
             content = res.get("content", [])
-            output_text = "\n".join([c.get("text", "") for c in content]) if content else res.get("error", "Executed.")
+            texts = [c.get("text", "") for c in (content or []) if isinstance(c, dict) and c.get("type", "text") == "text"]
+            if not texts and res.get("structuredContent") is not None:
+                texts = [json.dumps(res["structuredContent"], default=str)]
+            output_text = "\n".join(texts) if texts else res.get("error", "Executed (no text output).")
             is_error = res.get("isError", False) or "error" in res
             record: ToolCallRecord = {
                 "call_id": call_id,

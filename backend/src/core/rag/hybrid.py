@@ -1,20 +1,31 @@
 """Hybrid Search Query Engine (Dense Vector + BM25 Sparse Lexical)."""
+import re
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Sequence
 from src.core.db.session import db_manager
-from src.core.rag.embeddings import get_embedding
+from src.core.rag.embeddings import vector_literal
 from src.config import settings
 
 logger = logging.getLogger(__name__)
 
+def build_lexical_query(query: str) -> str:
+    """Build a to_tsquery expression that can never be a syntax error.
+
+    Only alphanumeric tokens survive (so "policy?", "what's" or "C++" cannot break
+    the parser) and they are OR-ed for recall; ts_rank orders the matches.
+    """
+    tokens = [t for t in re.findall(r"[A-Za-z0-9]+", query.lower()) if len(t) > 2]
+    return " | ".join(dict.fromkeys(tokens))
+
 async def search_dense_vectors(
-    query: str,
+    query_vector: Optional[Sequence[float]],
     application_name: str,
     limit: int = 20
 ) -> List[Dict[str, Any]]:
     """Retrieve top-K candidates using cosine similarity over pgvector HNSW index."""
-    query_vector = await get_embedding(query)
-    vector_str = "[" + ",".join(f"{x:.6f}" for x in query_vector) + "]"
+    if not query_vector:
+        return []
+    vector_str = vector_literal(query_vector)
 
     sql = """
         SELECT 
@@ -55,9 +66,9 @@ async def search_bm25_lexical(
     limit: int = 20
 ) -> List[Dict[str, Any]]:
     """Retrieve top-K candidates using full-text TSVECTOR search."""
-    cleaned_query = " | ".join(word for word in query.split() if len(word) > 2)
+    cleaned_query = build_lexical_query(query)
     if not cleaned_query:
-        cleaned_query = query
+        return []
 
     sql = """
         SELECT 

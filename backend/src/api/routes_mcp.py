@@ -21,7 +21,7 @@ async def list_mcp_servers_endpoint(
         ]
         servers_info.append({
             "name": name,
-            "transport": cfg.get("transport", "stdio"),
+            "transport": cfg.get("transport") or ("http" if cfg.get("url") else "stdio"),
             "status": "online" if enabled else "offline",
             "tool_count": len(tools_for_server)
         })
@@ -46,7 +46,7 @@ async def list_mcp_tools_endpoint(
             "full_name": full_name,
             "description": orig.get("description", ""),
             "input_schema": orig.get("inputSchema", {}),
-            "transport": t["config"].get("transport", "stdio"),
+            "transport": t["config"].get("transport") or ("http" if t["config"].get("url") else "stdio"),
             "is_active": True
         })
 

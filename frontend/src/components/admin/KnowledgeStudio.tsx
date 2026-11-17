@@ -3,6 +3,7 @@ import { FileUploader } from './FileUploader';
 import { FileTable } from './FileTable';
 import { AnswerOverrideStudio } from './AnswerOverrideStudio';
 import { FileRecord } from '../../types/admin';
+import { apiFetch } from '../../lib/api';
 
 export const KnowledgeStudio: React.FC = () => {
   const [files, setFiles] = useState<FileRecord[]>([]);
@@ -11,7 +12,7 @@ export const KnowledgeStudio: React.FC = () => {
   const fetchFiles = async () => {
     setIsLoading(true);
     try {
-      const resp = await fetch('/api/list_files', {
+      const resp = await apiFetch('/api/list_files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ page: 1, page_size: 50 }),

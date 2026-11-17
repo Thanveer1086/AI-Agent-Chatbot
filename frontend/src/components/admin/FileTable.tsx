@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { FileText, Trash2, Power, RefreshCw, Eye, X, Search, Copy, Check, Loader2 } from 'lucide-react';
 import { FileRecord } from '../../types/admin';
+import { apiFetch } from '../../lib/api';
 
 interface FileTableProps {
   files: FileRecord[];
@@ -40,7 +41,7 @@ export const FileTable: React.FC<FileTableProps> = ({ files, isLoading, onRefres
   const toggleStatus = async (file: FileRecord) => {
     setTogglingId(file.id);
     try {
-      await fetch('/api/toggle_file_status', {
+      await apiFetch('/api/toggle_file_status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -59,7 +60,7 @@ export const FileTable: React.FC<FileTableProps> = ({ files, isLoading, onRefres
   const deleteFile = async (id: number) => {
     if (!confirm('Are you sure you want to delete this file and its indexed vectors?')) return;
     try {
-      await fetch('/api/delete_files', {
+      await apiFetch('/api/delete_files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file_ids: [id] }),
@@ -81,7 +82,7 @@ export const FileTable: React.FC<FileTableProps> = ({ files, isLoading, onRefres
     });
 
     try {
-      const res = await fetch(`/api/files/${file.id}/chunks`);
+      const res = await apiFetch(`/api/files/${file.id}/chunks`);
       if (res.ok) {
         const data = await res.json();
         setInspector((prev) => ({

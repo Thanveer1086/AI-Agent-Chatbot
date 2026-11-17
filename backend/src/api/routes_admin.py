@@ -1,4 +1,5 @@
 """Admin Review, Q&A Overrides, Master Data, and User Feedback Routes."""
+import uuid
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -6,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from src.core.security.auth import get_current_user, require_admin, UserClaims
 from src.core.db.session import db_manager
-from src.core.rag.embeddings import get_embedding
+from src.core.rag.embeddings import get_embedding, vector_literal
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Admin Review & Feedback"])
@@ -27,16 +28,26 @@ async def submit_feedback_endpoint(
     user: UserClaims = Depends(get_current_user)
 ):
     """Record user satisfaction rating on an agent answer."""
+    try:
+        message_uuid = str(uuid.UUID(request.message_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="message_id must be a valid message UUID")
+
     async with db_manager.acquire() as conn:
-        try:
-            await conn.execute("""
-                INSERT INTO feedback_records (message_id, rating, comment)
-                VALUES ($1::uuid, $2, $3);
-            """, request.message_id, request.rating, request.comment)
-            return {"success": True, "message": "Feedback recorded successfully."}
-        except Exception as e:
-            logger.warning(f"Failed to record feedback: {e}")
-            return {"success": True, "message": "Feedback noted (message ID logged)."}
+        # Only assistant messages in the caller's own sessions can be rated.
+        owned = await conn.fetchval("""
+            SELECT 1 FROM chat_messages m
+            JOIN chat_sessions s ON s.id = m.session_id
+            WHERE m.id = $1::uuid AND m.role = 'assistant' AND s.user_id = $2;
+        """, message_uuid, user.user_id)
+        if not owned:
+            raise HTTPException(status_code=404, detail="Message not found")
+
+        await conn.execute("""
+            INSERT INTO feedback_records (message_id, rating, comment)
+            VALUES ($1::uuid, $2, $3);
+        """, message_uuid, request.rating, request.comment)
+    return {"success": True, "message": "Feedback recorded successfully."}
 
 @router.post("/override_answer")
 async def override_answer_endpoint(
@@ -45,8 +56,11 @@ async def override_answer_endpoint(
 ):
     """Publish an authoritative approved answer into the QA expansion vector collection."""
     # Generate embedding for the approved Q&A
-    dense_vec = await get_embedding(request.question_text)
-    vec_str = "[" + ",".join(f"{x:.6f}" for x in dense_vec) + "]"
+    try:
+        dense_vec = await get_embedding(request.question_text)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Embedding service unavailable: {e}")
+    vec_str = vector_literal(dense_vec)
 
     async with db_manager.acquire() as conn:
         row = await conn.fetchrow("""

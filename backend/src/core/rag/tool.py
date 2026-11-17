@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 from src.core.rag.hybrid import search_dense_vectors, search_bm25_lexical
 from src.core.rag.fusion import reciprocal_rank_fusion
 from src.core.rag.reranker import reranker
-from src.core.rag.embeddings import get_embedding
+from src.core.rag.embeddings import get_embedding, vector_literal
 from src.core.db.session import db_manager
 from src.config import settings
 
@@ -30,22 +30,23 @@ async def search_knowledge_base(
     app_name = await resolve_application_name(application_id)
     logger.info(f"Executing knowledge_base_search: query='{query}', app='{app_name}'")
 
-    # 1. Concurrent hybrid retrieval and approved overrides check
-    dense_task = search_dense_vectors(query, app_name, limit=settings.RERANK_INITIAL_LIMIT)
-    bm25_task = search_bm25_lexical(query, app_name, limit=settings.RERANK_INITIAL_LIMIT)
-    dense_results, bm25_results = await asyncio.gather(dense_task, bm25_task)
-
-    # 1.5 Check Approved Answers (Override Collection)
-    async with db_manager.acquire() as conn:
+    # 1. Embed the query once; if embeddings are unavailable, keyword search still runs.
+    query_vec = None
+    try:
         query_vec = await get_embedding(query)
-        v_str = "[" + ",".join(f"{x:.6f}" for x in query_vec) + "]"
-        approved_row = await conn.fetchrow("""
-            SELECT question_text, approved_answer, 1 - (dense_vector <=> $1::vector) as sim
-            FROM approved_answers
-            WHERE application_id = $2 AND status = 'answer_embedded'
-            ORDER BY dense_vector <=> $1::vector ASC
-            LIMIT 1;
-        """, v_str, application_id)
+    except Exception as e:
+        logger.warning(f"Query embedding unavailable ({e}); using keyword search only.")
+
+    # 1.5 Approved answers (override collection) short-circuit the full search
+    if query_vec is not None:
+        async with db_manager.acquire() as conn:
+            approved_row = await conn.fetchrow("""
+                SELECT question_text, approved_answer, 1 - (dense_vector <=> $1::vector) as sim
+                FROM approved_answers
+                WHERE application_id = $2 AND status = 'answer_embedded'
+                ORDER BY dense_vector <=> $1::vector ASC
+                LIMIT 1;
+            """, vector_literal(query_vec), application_id)
         if approved_row and float(approved_row["sim"]) >= 0.85:
             logger.info(f"High-confidence verified answer override matched ({approved_row['sim']:.3f})")
             return {
@@ -61,11 +62,17 @@ async def search_knowledge_base(
                 }]
             }
 
+    # 1.6 Concurrent hybrid retrieval
+    dense_results, bm25_results = await asyncio.gather(
+        search_dense_vectors(query_vec, app_name, limit=settings.RERANK_INITIAL_LIMIT),
+        search_bm25_lexical(query, app_name, limit=settings.RERANK_INITIAL_LIMIT),
+    )
+
     # 2. Reciprocal Rank Fusion
     fused_candidates = reciprocal_rank_fusion([dense_results, bm25_results], k=settings.RRF_K)
 
     # 3. CrossEncoder Reranking
-    final_passages = reranker.rerank(query, fused_candidates, top_k=top_k)
+    final_passages = await reranker.arerank(query, fused_candidates, top_k=top_k)
 
     # 4. Format structured output for LLM consumption
     citations = []

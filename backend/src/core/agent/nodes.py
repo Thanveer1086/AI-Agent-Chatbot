@@ -1,20 +1,29 @@
 """LangGraph Nodes: Planner, Tool Executor, Reflection, and Synthesizer."""
-import time
-import json
 import re
+import json
+import time
+import difflib
 import logging
-from typing import Dict, Any, List, Optional
-from datetime import datetime
-from src.core.agent.state import AgentState, ToolCallRecord, ThoughtStepRecord
-from src.core.rag.tool import search_knowledge_base, KNOWLEDGE_TOOL_SCHEMA
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional, Tuple
+
+from langchain_core.messages import BaseMessage, HumanMessage
+
+from src.config import settings
+from src.core import llm
+from src.core.agent.state import AgentState, ThoughtStepRecord
+from src.core.db.session import db_manager
 from src.core.mcp.executor import execute_tools_parallel
 from src.core.mcp.manager import mcp_manager
-from src.config import settings
+from src.core.security.guardrails import UNTRUSTED_DATA_RULE, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
-import difflib
-from src.core.db.session import db_manager
+KNOWLEDGE_TOOL = "knowledge_base_search"
+MAX_TOOLS_PER_STEP = 3
+MAX_KB_SEARCHES_PER_TURN = 2
+MAX_HISTORY_CHARS = 2000
+MAX_TOOL_OUTPUT_CHARS = 12000
 
 # Keywords indicating intent for internal company knowledge, meetings, or uploaded documents
 INTERNAL_INTENT_PATTERNS = [
@@ -23,7 +32,33 @@ INTERNAL_INTENT_PATTERNS = [
     r"\b(our\s+[a-z]+|my\s+(team|manager|leave|policy|expense|salary|benefit)|hr\b|it support)\b"
 ]
 
-async def check_internal_search_needed(query: str):
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _thought(step: int, text: str) -> ThoughtStepRecord:
+    return {"step": step, "thought": text, "timestamp": _now()}
+
+
+def _role(m: BaseMessage) -> str:
+    return "user" if isinstance(m, HumanMessage) else "assistant"
+
+
+def _history_as_messages(messages: List[BaseMessage]) -> List[Dict[str, str]]:
+    """Prior turns (everything except the current question) in provider-neutral form."""
+    return [
+        {"role": _role(m), "content": str(m.content)[:MAX_HISTORY_CHARS]}
+        for m in messages[:-1]
+    ]
+
+
+def _history_as_text(messages: List[BaseMessage], limit: int = 6) -> str:
+    prior = messages[:-1][-limit:]
+    return "\n".join(f"{_role(m).title()}: {str(m.content)[:600]}" for m in prior)
+
+
+async def check_internal_search_needed(query: str) -> Tuple[bool, Optional[str]]:
     """Determine if query is targeted at internal company documents, meetings, or uploaded files."""
     query_lower = query.lower().strip()
 
@@ -34,153 +69,206 @@ async def check_internal_search_needed(query: str):
     try:
         async with db_manager.acquire() as conn:
             rows = await conn.fetch("SELECT filename FROM uploaded_files WHERE is_enabled = TRUE;")
-            file_names = [r["filename"] for r in rows]
-            query_words = [w for w in re.findall(r"[a-zA-Z0-9_-]+", query_lower) if len(w) >= 3]
-            for fname in file_names:
-                clean_fname = re.sub(r"\.[a-zA-Z0-9]+$", "", fname).lower()
-                fname_tokens = [w for w in re.findall(r"[a-zA-Z0-9_-]+", clean_fname) if len(w) >= 3]
-                for q_word in query_words:
-                    for f_token in fname_tokens:
-                        if q_word in f_token or f_token in q_word:
-                            return True, clean_fname
-                        if difflib.SequenceMatcher(None, q_word, f_token).ratio() >= 0.72:
-                            return True, clean_fname
+        query_words = [w for w in re.findall(r"[a-zA-Z0-9_-]+", query_lower) if len(w) >= 3]
+        for r in rows:
+            clean_fname = re.sub(r"\.[a-zA-Z0-9]+$", "", r["filename"]).lower()
+            fname_tokens = [w for w in re.findall(r"[a-zA-Z0-9_-]+", clean_fname) if len(w) >= 3]
+            for q_word in query_words:
+                for f_token in fname_tokens:
+                    if q_word in f_token or f_token in q_word:
+                        return True, clean_fname
+                    if difflib.SequenceMatcher(None, q_word, f_token).ratio() >= 0.72:
+                        return True, clean_fname
     except Exception as e:
         logger.warning(f"Error checking active filenames: {e}")
 
     return False, None
 
-async def llm_plan_step(query: str, application_id: int = 1, history: Optional[List[Dict[str, Any]]] = None):
-    """Dynamically plan tools using LLM reasoning over all discovered MCP tools and RAG."""
-    if not mcp_manager.discovered_tools:
-        await mcp_manager.discover_tools()
 
-    tools_doc = [
-        "- knowledge_base_search(query): Searches internal company documents, meeting notes/recordings, transcripts, policies, specifications, and uploaded files in the vector database."
+def _describe_params(schema: Dict[str, Any]) -> str:
+    props = schema.get("properties", {}) or {}
+    required = set(schema.get("required", []) or [])
+    parts = []
+    for name, spec in props.items():
+        typ = spec.get("type", "any") if isinstance(spec, dict) else "any"
+        parts.append(f"{name}{'' if name in required else '?'}: {typ}")
+    return ", ".join(parts)
+
+
+def _tools_catalog() -> str:
+    lines = [
+        f"- {KNOWLEDGE_TOOL}(query: string): Searches internal company documents, meeting notes, "
+        "transcripts, policies, specifications and uploaded files."
     ]
     for full_name, t in mcp_manager.discovered_tools.items():
         orig = t.get("original_tool", {})
-        desc = orig.get("description", "Execute tool")
-        req_params = orig.get("inputSchema", {}).get("required", [])
-        params_str = f"({', '.join(req_params)})" if req_params else "()"
-        tools_doc.append(f"- {full_name}{params_str}: {desc[:140]}")
+        params = _describe_params(orig.get("inputSchema", {}) or {})
+        desc = (orig.get("description") or "Execute tool").replace("\n", " ")[:200]
+        lines.append(f"- {full_name}({params}): {desc}")
+    return "\n".join(lines)
 
-    tools_prompt = "\n".join(tools_doc)
 
-    history_context = ""
-    if history:
-        history_summary = []
-        for h in history:
-            output_snippet = str(h.get("output", ""))[:180]
-            history_summary.append(f"- Tool '{h.get('tool_name')}' result: {output_snippet}")
-        history_context = "\nActions Completed So Far:\n" + "\n".join(history_summary) + "\n"
+def prepare_arguments(tool: str, arguments: Any, standalone_query: str, application_id: int) -> Dict[str, Any]:
+    """Normalise planner arguments and fill the few values the system owns."""
+    args = dict(arguments) if isinstance(arguments, dict) else {}
+    if tool == KNOWLEDGE_TOOL:
+        query = args.get("query")
+        args = {
+            "query": query if isinstance(query, str) and query.strip() else standalone_query,
+            # The application scope comes from the chat request, never from the model.
+            "application_id": application_id,
+        }
+    elif tool.endswith("search_repositories") and not args.get("query") and mcp_manager.authenticated_user:
+        args["query"] = f"user:{mcp_manager.authenticated_user}"
+    return args
 
-    prompt = f"""You are an autonomous AI Agent Planner.
-Analyze the user's inquiry and the actions completed so far.
-Select the single next best tool to call, or 'none' if you have sufficient information to answer the user query directly.
 
-Available Tools:
-{tools_prompt}
-{history_context}
-User Query: "{query}"
+def _call_signature(name: str, args: Dict[str, Any]) -> str:
+    return name + json.dumps(args, sort_keys=True, default=str)
 
-Respond ONLY with a JSON object:
-{{
-  "tool": "exact_tool_name_or_none",
-  "arguments": {{}},
-  "thought": "Brief explanation of your decision for this step"
-}}
-"""
-    if settings.GEMINI_API_KEY:
+
+PLANNER_SYSTEM = (
+    "You are the planning module of an autonomous AI agent. Decide which tools (if any) must run "
+    "next to answer the user's latest message. Use the conversation to resolve references such as "
+    "'it', 'that one' or 'the second repo'. Only use tool names from the catalog and pass arguments "
+    "that match each tool's parameters. Independent tools may run in the same step (max "
+    f"{MAX_TOOLS_PER_STEP}). Return an empty tool_calls list when the evidence so far is enough, "
+    "or when the question is general knowledge or small talk. Never repeat a call that already ran "
+    "with the same arguments. If a knowledge_base_search already returned relevant passages, do NOT "
+    "search again with reworded queries: return an empty tool_calls list so the answer can be written. "
+    + UNTRUSTED_DATA_RULE
+)
+
+
+async def llm_plan_step(
+    messages: List[BaseMessage],
+    application_id: int = 1,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Plan the next tool calls with the LLM, using conversation context and prior results."""
+    if not mcp_manager.discovered_tools:
         try:
-            import asyncio
-            from google import genai
-            client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            resp = await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-3.5-flash-lite",
-                contents=prompt
-            )
-            raw = resp.text.strip()
-            if "```" in raw:
-                raw = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw).group(1)
-            parsed = json.loads(raw)
-            tool = parsed.get("tool", "none").strip()
-            tool = re.sub(r"\(.*\)$", "", tool).strip()
-            thought = parsed.get("thought", f"Planned action: {tool}")
-            arguments = parsed.get("arguments", {})
+            await mcp_manager.discover_tools()
+        except Exception as e:
+            logger.warning(f"MCP discovery failed during planning: {e}")
 
-            if tool and tool != "none":
-                default_user = mcp_manager.authenticated_user or getattr(settings, "GITHUB_USERNAME", "Thanveer1086")
-                if tool == "knowledge_base_search":
-                    if "query" not in arguments:
-                        arguments["query"] = query
-                    arguments["application_id"] = application_id
-                elif "search_repositories" in tool and not arguments.get("query"):
-                    arguments["query"] = f"user:{default_user}"
-                elif "search_" in tool and "query" not in arguments:
-                    arguments["query"] = f"user:{default_user}"
-                    
-                call_id = f"call_{'rag' if tool == 'knowledge_base_search' else 'mcp'}_{int(time.time()*1000)}"
-                return thought, [{
-                    "call_id": call_id,
+    query = str(messages[-1].content) if messages else ""
+    history = history or []
+
+    completed = ""
+    if history:
+        completed = "\n\nActions completed so far:\n" + "\n".join(
+            f"- {h.get('tool_name')}({json.dumps(h.get('arguments', {}), default=str)}) "
+            f"[{h.get('status')}]:\n" + wrap_untrusted(str(h.get("tool_name")), str(h.get("output", ""))[:400])
+            for h in history
+        )
+
+    conversation = _history_as_text(messages)
+    prompt = (
+        f"Tool catalog:\n{_tools_catalog()}\n\n"
+        + (f"Conversation so far:\n{conversation}\n\n" if conversation else "")
+        + f"Latest user message: {query}"
+        + completed
+        + "\n\nRespond ONLY with a JSON object of this shape:\n"
+        '{"thought": "brief reason for the decision", '
+        '"standalone_query": "the latest message rewritten so it is understandable without the conversation", '
+        '"tool_calls": [{"tool": "exact_tool_name", "arguments": {}}]}'
+    )
+
+    if llm.active_provider():
+        try:
+            raw = await llm.complete(
+                [{"role": "user", "content": prompt}],
+                system=PLANNER_SYSTEM,
+                temperature=0.0,
+                json_mode=True,
+                model=settings.PLANNER_MODEL,
+            )
+            parsed = llm.parse_json_object(raw)
+            thought = str(parsed.get("thought") or "Planning next step.")
+            standalone = str(parsed.get("standalone_query") or query).strip() or query
+
+            known = set(mcp_manager.discovered_tools) | {KNOWLEDGE_TOOL}
+            already_run = {_call_signature(h["tool_name"], h.get("arguments", {})) for h in history}
+            calls: List[Dict[str, Any]] = []
+            seen = set()
+            kb_searches = sum(1 for h in history if h.get("tool_name") == KNOWLEDGE_TOOL)
+            raw_calls = parsed.get("tool_calls") or []
+            if not raw_calls and parsed.get("tool") not in (None, "", "none"):
+                raw_calls = [{"tool": parsed.get("tool"), "arguments": parsed.get("arguments", {})}]
+
+            for item in raw_calls[:MAX_TOOLS_PER_STEP]:
+                if not isinstance(item, dict):
+                    continue
+                tool = re.sub(r"\(.*\)$", "", str(item.get("tool", ""))).strip()
+                if tool not in known:
+                    logger.warning(f"Planner chose unknown tool '{tool}'; ignoring.")
+                    continue
+                args = prepare_arguments(tool, item.get("arguments"), standalone, application_id)
+                sig = _call_signature(tool, args)
+                if sig in already_run or sig in seen:
+                    continue
+                if tool == KNOWLEDGE_TOOL and kb_searches >= MAX_KB_SEARCHES_PER_TURN:
+                    # Reworded re-searches rarely add evidence but cost a model call each
+                    logger.info("Knowledge search cap reached for this turn; skipping re-search.")
+                    continue
+                if tool == KNOWLEDGE_TOOL:
+                    kb_searches += 1
+                seen.add(sig)
+                calls.append({
+                    "call_id": f"call_{'rag' if tool == KNOWLEDGE_TOOL else 'mcp'}_{time.time_ns()}_{len(calls)}",
                     "name": tool,
-                    "arguments": arguments
-                }]
-            else:
-                return thought, []
+                    "arguments": args,
+                })
+            return thought, calls
         except Exception as e:
             logger.warning(f"LLM planner failed ({e}), falling back to heuristic planner")
 
-    # Fallback heuristic if LLM planner fails or no API key
+    # Heuristic fallback only decides the first step; later steps just answer.
+    if history:
+        return "Proceeding to answer with the evidence gathered.", []
+
     needs_kb, matched_hint = await check_internal_search_needed(query)
     if needs_kb:
         search_query = f"{query} {matched_hint}" if matched_hint else query
-        thought = (
-            f"User query relates to internal documentation, meeting notes, or uploaded files. "
-            "Dispatching knowledge base search tool."
+        return (
+            "User query relates to internal documentation, meeting notes, or uploaded files. "
+            "Dispatching knowledge base search tool.",
+            [{
+                "call_id": f"call_rag_{time.time_ns()}",
+                "name": KNOWLEDGE_TOOL,
+                "arguments": {"query": search_query, "application_id": application_id},
+            }],
         )
-        return thought, [{
-            "call_id": f"call_rag_{int(time.time()*1000)}",
-            "name": "knowledge_base_search",
-            "arguments": {
-                "query": search_query,
-                "application_id": application_id
-            }
-        }]
 
-    return "General or conceptual inquiry. Answering directly using comprehensive knowledge without requiring external tools.", []
+    return "General or conceptual inquiry. Answering directly without external tools.", []
+
 
 async def planner_node(state: AgentState) -> Dict[str, Any]:
-    """Analyzes the latest user message and determines the plan and necessary tool calls."""
-    messages = state["messages"]
-    last_user_msg = messages[-1].content if messages else ""
+    """Analyzes the conversation and determines the plan and necessary tool calls."""
+    messages = list(state["messages"])
+    last_user_msg = str(messages[-1].content) if messages else ""
     current_iteration = state.get("iteration_count", 0) + 1
     existing_queue = state.get("tool_calls_queue", [])
 
     if existing_queue:
         queued_tools = existing_queue
-        full_thought = f"Iteration {current_iteration}: Executing next step tool: {', '.join([t['name'] for t in queued_tools])}"
+        full_thought = f"Iteration {current_iteration}: Executing next step tool: {', '.join(t['name'] for t in queued_tools)}"
     elif current_iteration == 1:
-        thought, queued_tools = await llm_plan_step(last_user_msg, state.get("application_id", 1))
+        thought, queued_tools = await llm_plan_step(messages, state.get("application_id", 1))
         full_thought = f"Iteration {current_iteration}: {thought}"
     else:
         full_thought = f"Iteration {current_iteration}: Reflection complete. Proceeding with synthesis."
         queued_tools = []
 
-    thought_record: ThoughtStepRecord = {
-        "step": current_iteration,
-        "thought": full_thought,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
     return {
         "iteration_count": current_iteration,
-        "plan": f"Plan: {'Execute tools ' + ', '.join([t['name'] for t in queued_tools]) if queued_tools else 'Direct synthesis'} for '{last_user_msg}'",
+        "plan": f"Plan: {'Execute tools ' + ', '.join(t['name'] for t in queued_tools) if queued_tools else 'Direct synthesis'} for '{last_user_msg}'",
         "tool_calls_queue": queued_tools,
-        "intermediate_thoughts": [thought_record],
+        "intermediate_thoughts": [_thought(current_iteration, full_thought)],
         "status": "executing_tools" if queued_tools else "answering"
     }
+
 
 async def tool_executor_node(state: AgentState) -> Dict[str, Any]:
     """Executes all queued tool calls concurrently with per-tool timeout protection."""
@@ -189,183 +277,136 @@ async def tool_executor_node(state: AgentState) -> Dict[str, Any]:
         return {"status": "reflecting"}
 
     records, new_citations = await execute_tools_parallel(queue)
-    existing_history = state.get("tool_execution_history", [])
-    existing_citations = state.get("citations", [])
 
+    # tool_execution_history and citations use an `operator.add` reducer, so only the
+    # NEW items are returned; returning old + new would duplicate every earlier entry.
     return {
         "tool_calls_queue": [],
-        "tool_execution_history": existing_history + records,
-        "citations": existing_citations + new_citations,
+        "tool_execution_history": records,
+        "citations": new_citations,
         "status": "reflecting"
     }
+
 
 async def reflection_node(state: AgentState) -> Dict[str, Any]:
     """Reflects on tool outputs and determines whether to loop or synthesize the final answer."""
     iteration = state.get("iteration_count", 1)
     history = state.get("tool_execution_history", [])
-    messages = state.get("messages", [])
-    last_user_msg = messages[-1].content if messages else ""
+    messages = list(state.get("messages", []))
 
-    # If reached max iteration limit or no history, finalize
     if iteration >= settings.MAX_AGENT_ITERATIONS or not history:
-        thought_record: ThoughtStepRecord = {
-            "step": iteration + 1,
-            "thought": "Evaluation complete. Evidence analyzed, proceeding to synthesize comprehensive answer.",
-            "timestamp": datetime.utcnow().isoformat()
-        }
         return {
-            "intermediate_thoughts": [thought_record],
+            "intermediate_thoughts": [_thought(iteration + 1, "Evaluation complete. Evidence analyzed, proceeding to synthesize comprehensive answer.")],
             "status": "answering"
         }
 
-    # Evaluate whether a follow-up tool is needed
     try:
-        thought, next_tools = await llm_plan_step(last_user_msg, state.get("application_id", 1), history=history)
+        thought, next_tools = await llm_plan_step(messages, state.get("application_id", 1), history=history)
         if next_tools:
-            thought_record: ThoughtStepRecord = {
-                "step": iteration + 1,
-                "thought": f"Reflection: Additional action needed -> {thought}",
-                "timestamp": datetime.utcnow().isoformat()
-            }
             return {
                 "tool_calls_queue": next_tools,
-                "intermediate_thoughts": [thought_record],
+                "intermediate_thoughts": [_thought(iteration + 1, f"Reflection: Additional action needed -> {thought}")],
                 "status": "planning"
             }
     except Exception as e:
         logger.warning(f"Reflection follow-up evaluation failed ({e}), proceeding to answer.")
 
-    thought_record = {
-        "step": iteration + 1,
-        "thought": "Evaluation complete. Sufficient evidence gathered, proceeding to synthesize answer.",
-        "timestamp": datetime.utcnow().isoformat()
-    }
     return {
-        "intermediate_thoughts": [thought_record],
+        "intermediate_thoughts": [_thought(iteration + 1, "Evaluation complete. Sufficient evidence gathered, proceeding to synthesize answer.")],
         "status": "answering"
     }
 
+
+ANSWER_SYSTEM = (
+    "You are an intelligent, helpful enterprise AI assistant.\n"
+    "- If internal documentation or tool output is provided, prioritize it and cite facts accurately "
+    "using the [n] source numbers where available.\n"
+    "- If the user asks a general knowledge, conceptual, or conversational question, answer it clearly "
+    "and thoroughly using your broad general knowledge.\n"
+    "- If internal context was searched but nothing relevant was found, answer helpfully from general "
+    "knowledge and say that no specific internal document matched.\n"
+    "- If a tool returned an error, explain it briefly and plainly.\n"
+    f"- {UNTRUSTED_DATA_RULE}"
+)
+
+
+def _get_writer():
+    try:
+        from langgraph.config import get_stream_writer
+        return get_stream_writer()
+    except Exception:
+        return lambda _chunk: None
+
+
+def _offline_answer(query: str, passages: str) -> str:
+    query_lower = query.lower().strip()
+    if query_lower in ["hi", "hello", "hey", "greetings"]:
+        return (
+            "Hello! 👋 I am your autonomous enterprise AI assistant. You can ask me:\n\n"
+            "- **General questions** (e.g., definitions, technology explainers, coding)\n"
+            "- **Company policies & documentation** (via our Knowledge Base)\n"
+            "- **Tool operations** (via Model Context Protocol - MCP)\n\n"
+            "How can I assist you today?"
+        )
+    if passages:
+        return (
+            f"Based on internal knowledge base documentation:\n\n{passages[:800]}...\n\n"
+            "Please review the attached source citations for full details."
+        )
+    return (
+        f"### Query Received: *\"{query}\"*\n\n"
+        "No language model is available right now (no API key configured, or every model call failed).\n\n"
+        "**To enable live answers:**\n"
+        "1. Open `.env` in the project root directory.\n"
+        "2. Set `GEMINI_API_KEY=...` or `OPENAI_API_KEY=...`\n"
+        "3. Restart the backend container (`docker compose up -d backend`).\n\n"
+        "You can still upload documents in the **Knowledge Studio** tab."
+    )
+
+
 async def answer_node(state: AgentState) -> Dict[str, Any]:
-    """Synthesizes final answer from gathered evidence or general AI knowledge."""
+    """Synthesizes the final answer, streaming tokens to the client as they are generated."""
     history = state.get("tool_execution_history", [])
-    citations = state.get("citations", [])
-    messages = state["messages"]
-    last_user_msg = messages[-1].content if messages else ""
+    messages = list(state["messages"])
+    last_user_msg = str(messages[-1].content) if messages else ""
 
-    # Synthesize context from any executed tools
-    valid_passages = [str(h["output"]) for h in history if h["status"] == "success" and "No matching documents" not in str(h["output"])]
-    passages = "\n\n".join(valid_passages)
+    evidence = [
+        wrap_untrusted(h["tool_name"], str(h["output"])[:MAX_TOOL_OUTPUT_CHARS])
+        for h in history
+        if h["status"] == "success" and "No matching documents" not in str(h["output"])
+    ]
+    errors = [f"{h['tool_name']}: {str(h['output'])[:300]}" for h in history if h["status"] != "success"]
+    passages = "\n\n".join(evidence)
+    raw_passages = "\n\n".join(
+        str(h["output"]) for h in history
+        if h["status"] == "success" and "No matching documents" not in str(h["output"])
+    )
 
-    # Format multi-turn conversational history if present
-    conversation_history_text = ""
-    if len(messages) > 1:
-        history_lines = []
-        for m in messages[:-1]:
-            sender = "User" if m.__class__.__name__ == "HumanMessage" else "Assistant"
-            history_lines.append(f"{sender}: {m.content}")
-        conversation_history_text = "Prior Conversation Context:\n" + "\n".join(history_lines) + "\n\n"
+    user_content = (
+        f"Context:\n{passages if passages else 'None'}\n\n"
+        + (f"Tool errors:\n" + "\n".join(errors) + "\n\n" if errors else "")
+        + f"User Question: {last_user_msg}"
+    )
+    llm_messages = _history_as_messages(messages) + [{"role": "user", "content": user_content}]
 
-    final_text = ""
+    writer = _get_writer()
+    parts: List[str] = []
 
-    # 1. Generate with OpenAI if configured
-    if settings.OPENAI_API_KEY and (settings.API_USED == "openai" or not settings.GEMINI_API_KEY):
+    if llm.active_provider():
         try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-            system_prompt = (
-                "You are an intelligent, helpful enterprise AI assistant.\n"
-                "- If relevant internal documentation or tool output is provided in the Context below, prioritize it and cite facts accurately.\n"
-                "- If the user asks a general knowledge, conceptual, or conversational question, answer it clearly, thoroughly, and helpfully using your broad general knowledge.\n"
-                "- If internal context was searched but no specific company documents were found, answer the question helpfully using general knowledge while clarifying that no specific internal company document was matched."
-            )
-            user_content = f"{conversation_history_text}Context:\n{passages if passages else 'None'}\n\nUser Question: {last_user_msg}"
-            
-            resp = await client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                temperature=0.3,
-            )
-            final_text = resp.choices[0].message.content or ""
+            async for text in llm.stream(llm_messages, system=ANSWER_SYSTEM):
+                parts.append(text)
+                writer({"type": "token", "text": text})
         except Exception as e:
-            logger.error(f"OpenAI answer generation failed: {e}")
+            logger.error(f"Answer generation failed: {e}")
+            if parts:
+                note = "\n\n⚠️ *The response was interrupted before it finished.*"
+                parts.append(note)
+                writer({"type": "token", "text": note})
 
-    # 2. Generate with Gemini if configured
-    elif settings.GEMINI_API_KEY:
-        try:
-            import asyncio
-            from google import genai
-            client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            prompt = (
-                f"You are a helpful enterprise AI assistant.\n"
-                f"{conversation_history_text}"
-                f"- If internal context is provided, ground your response in it:\n{passages if passages else 'None'}\n"
-                f"- Otherwise, answer the user's question accurately, thoroughly, and helpfully using general knowledge.\n\n"
-                f"User Question: {last_user_msg}"
-            )
-            # Try available flash models in order of latency and availability
-            candidate_models = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite"]
-            for m in candidate_models:
-                try:
-                    response = await asyncio.to_thread(
-                        client.models.generate_content,
-                        model=m,
-                        contents=prompt
-                    )
-                    if response and response.text:
-                        final_text = response.text
-                        break
-                except Exception as model_err:
-                    logger.warning(f"Gemini generation with {m} failed ({model_err}), trying next candidate...")
-        except Exception as e:
-            logger.error(f"Gemini answer generation failed: {e}")
-
-    # 3. Intelligent fallback when no external LLM key is configured yet
+    final_text = "".join(parts)
     if not final_text:
-        query_lower = last_user_msg.lower().strip()
-        if "what is an ai" in query_lower or "what is ai" in query_lower or "artificial intelligence" in query_lower:
-            final_text = (
-                "**Artificial Intelligence (AI)** refers to the simulation of human intelligence in machines that are programmed to think, learn, and solve problems.\n\n"
-                "### Core Branches of AI:\n"
-                "1. **Machine Learning (ML)**: Algorithms that learn from data patterns to make predictions or decisions without explicit rule programming.\n"
-                "2. **Deep Learning**: Multi-layered artificial neural networks capable of processing images, audio, video, and complex language representations.\n"
-                "3. **Generative AI & LLMs**: Transformer-based models (such as GPT-4 and Gemini) capable of generating coherent text, code, images, and multimodal content.\n"
-                "4. **Autonomous AI Agents**: Systems combining LLM reasoning, long-term memory, planning loops, and tool execution (like MCP tools and Vector RAG) to achieve goals autonomously.\n\n"
-                "> 💡 *Tip: To enable live dynamic responses for any question, add your `OPENAI_API_KEY` or `GEMINI_API_KEY` to the `.env` file and restart.*"
-            )
-        elif query_lower in ["hi", "hello", "hey", "greetings"]:
-            final_text = (
-                "Hello! 👋 I am your autonomous enterprise AI assistant. You can ask me:\n\n"
-                "- **General questions** (e.g., definitions, technology explainers, coding)\n"
-                "- **Company policies & documentation** (via our Knowledge Base)\n"
-                "- **Tool operations** (via Model Context Protocol - MCP)\n\n"
-                "How can I assist you today?"
-            )
-        elif passages:
-            final_text = (
-                f"Based on internal knowledge base documentation:\n\n"
-                f"{passages[:800]}...\n\n"
-                f"Please review the attached source citations for full details."
-            )
-        else:
-            final_text = (
-                f"### Query Received: *\"{last_user_msg}\"*\n\n"
-                "The chatbot is currently running without an external LLM API key configured in `.env`.\n\n"
-                "**To enable live answers for all general and custom questions:**\n"
-                "1. Open `.env` in the project root directory.\n"
-                "2. Set your API key:\n"
-                "   ```env\n"
-                "   OPENAI_API_KEY=your_key_here\n"
-                "   # or\n"
-                "   GEMINI_API_KEY=your_key_here\n"
-                "   ```\n"
-                "3. Restart the backend container (`docker compose restart backend`).\n\n"
-                "You can also upload PDFs/Word documents in the **Knowledge Base** tab to search internal documents!"
-            )
+        final_text = _offline_answer(last_user_msg, raw_passages)
+        writer({"type": "token", "text": final_text})
 
-    return {
-        "final_answer": final_text,
-        "status": "completed"
-    }
+    return {"final_answer": final_text, "status": "completed"}

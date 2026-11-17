@@ -23,6 +23,7 @@ import { ThoughtAccordion } from './ThoughtAccordion';
 import { CitationDrawer } from './CitationDrawer';
 import { ChatSidebar } from './ChatSidebar';
 import { CodeBlock } from './CodeBlock';
+import { apiFetch, errorMessage } from '../../lib/api';
 
 export const ChatContainer: React.FC = () => {
   const [input, setInput] = useState<string>('');
@@ -155,7 +156,7 @@ export const ChatContainer: React.FC = () => {
       if (msg.role === 'assistant' && msg.thoughts && msg.thoughts.length > 0) {
         md += `<details>\n<summary>Thinking Process (${msg.thoughts.length} steps)</summary>\n\n`;
         msg.thoughts.forEach((t) => {
-          md += `- **${t.step_title}**: ${t.description}\n`;
+          md += `- **Step ${t.step}**: ${t.thought}\n`;
         });
         md += `\n</details>\n\n`;
       }
@@ -187,14 +188,19 @@ export const ChatContainer: React.FC = () => {
 
   const submitFeedback = async (messageId: string, rating: 'satisfactory' | 'unsatisfactory') => {
     try {
-      await fetch('/api/submit/feedback', {
+      const res = await apiFetch('/api/submit/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message_id: messageId, rating }),
       });
+      if (!res.ok) {
+        alert(`Feedback was not saved: ${await errorMessage(res)}`);
+        return;
+      }
       alert(`Thank you! Marked as ${rating}.`);
     } catch (err) {
       console.error('Feedback error:', err);
+      alert('Feedback was not saved: network error.');
     }
   };
 

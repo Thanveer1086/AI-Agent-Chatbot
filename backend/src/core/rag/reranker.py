@@ -1,4 +1,5 @@
 """CrossEncoder Semantic Reranker Integration."""
+import asyncio
 import logging
 from typing import List, Dict, Any
 from src.config import settings
@@ -53,5 +54,14 @@ class SemanticReranker:
         except Exception as e:
             logger.error(f"CrossEncoder inference error: {e}")
             return candidates[:top_k]
+
+    async def arerank(
+        self,
+        query: str,
+        candidates: List[Dict[str, Any]],
+        top_k: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Run model loading and inference in a worker thread so the event loop stays free."""
+        return await asyncio.to_thread(self.rerank, query, candidates, top_k)
 
 reranker = SemanticReranker()

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Cpu, RefreshCw, CheckCircle2, Server, Terminal, Wrench } from 'lucide-react';
 import { MCPServerInfo, MCPTool } from '../../types/admin';
+import { apiFetch } from '../../lib/api';
 
 export const MCPInspector: React.FC = () => {
   const [servers, setServers] = useState<MCPServerInfo[]>([]);
@@ -12,8 +13,8 @@ export const MCPInspector: React.FC = () => {
     setIsLoading(true);
     try {
       const [serversResp, toolsResp] = await Promise.all([
-        fetch('/api/mcp/servers'),
-        fetch('/api/mcp/tools'),
+        apiFetch('/api/mcp/servers'),
+        apiFetch('/api/mcp/tools'),
       ]);
       const serversData = await serversResp.json();
       const toolsData = await toolsResp.json();
@@ -30,7 +31,7 @@ export const MCPInspector: React.FC = () => {
   const handleReload = async () => {
     setIsReloading(true);
     try {
-      await fetch('/api/mcp/reload', { method: 'POST' });
+      await apiFetch('/api/mcp/reload', { method: 'POST' });
       await fetchMCPState();
     } catch (err) {
       console.error('Error reloading MCP tools:', err);

@@ -9,6 +9,7 @@ from src.core.security.auth import get_current_user, require_admin, UserClaims
 from src.core.rag.file_service import process_and_index_file
 from src.core.db.session import db_manager
 from src.core.db.blob import storage_client
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Knowledge & Files"])
@@ -47,13 +48,19 @@ async def upload_file_endpoint(
         except Exception:
             pass
 
-    content = await file.read()
+    if not isinstance(app_ids, list) or not all(isinstance(a, int) for a in app_ids) or not app_ids:
+        raise HTTPException(status_code=400, detail="application_ids must be a non-empty JSON array of integers")
+
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    content = await file.read(max_bytes + 1)
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="Cannot upload empty file")
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File exceeds the {settings.MAX_UPLOAD_MB} MB limit")
 
     success, message, data = await process_and_index_file(
         file_bytes=content,
-        filename=file.filename,
+        filename=file.filename or "",
         application_ids=app_ids,
         document_type_id=document_type_id,
         category_ids=cat_ids,
@@ -161,14 +168,23 @@ async def delete_files_endpoint(
 ):
     """Delete files from database, vector collection, and storage."""
     deleted_count = 0
+    blob_keys = []
     async with db_manager.acquire() as conn:
-        for file_id in request.file_ids:
-            row = await conn.fetchrow("SELECT filename FROM uploaded_files WHERE id = $1", file_id)
-            if row:
-                filename = row["filename"]
-                await storage_client.delete(filename)
-                await conn.execute("DELETE FROM uploaded_files WHERE id = $1", file_id)
-                deleted_count += 1
+        async with conn.transaction():
+            rows = await conn.fetch(
+                "DELETE FROM uploaded_files WHERE id = ANY($1::int[]) RETURNING storage_url",
+                request.file_ids,
+            )
+            deleted_count = len(rows)
+            blob_keys = [storage_client.key_from_storage_url(r["storage_url"]) for r in rows]
+
+    # Blobs are removed only after the DB rows are gone; a failed blob delete leaves
+    # an orphan file, never a DB record pointing at a missing file.
+    for key in blob_keys:
+        try:
+            await storage_client.delete(key)
+        except Exception as e:
+            logger.warning(f"Could not delete blob '{key}': {e}")
 
     return {"success": True, "deleted_count": deleted_count}
 
