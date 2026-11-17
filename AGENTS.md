@@ -95,3 +95,13 @@ When making modifications, verify functionality across these endpoints:
 
 3. **Database Inspection**:
    - Open `http://localhost:8080` (System: PostgreSQL, Server: `db`, User/Pass: `postgres`/`postgres`, DB: `agent_chatbot`).
+
+---
+
+## 6. Git & Version Control Protocol (STRICT RULE)
+
+- **NO AUTOMATIC COMMITS OR PUSHES**: Agents must **NEVER** run `git commit` or `git push` on their own.
+- **MANUAL DEVELOPER VERIFICATION**: The user must review, test, and verify all code modifications first.
+- **USER-CONTROLLED GIT WORKFLOW**: Staging (`git add`), committing (`git commit`), and pushing (`git push`) to GitHub is strictly reserved for the human developer to perform manually.
+- Agents may only run non-mutating Git inspection commands (e.g. `git status`, `git diff`, `git check-ignore`) when explicitly requested to verify code cleanliness or ensure secrets are not tracked.
+

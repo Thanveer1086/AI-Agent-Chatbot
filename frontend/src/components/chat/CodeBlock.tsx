@@ -7,13 +7,120 @@ interface CodeBlockProps {
   children?: React.ReactNode;
 }
 
+// Tokenize a line of code into comments, strings, words, and punctuation
+function parseLineToTokens(line: string): string[] {
+  if (!line) return [' '];
+
+  // Regex captures:
+  // 1: Comments (#... or //...)
+  // 2: String literals ("..." or '...' or `...`)
+  // 3: Words (\b\w+\b)
+  // 4: Operators, punctuation, or spaces
+  const regex = /(#.*|\/\/.*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`)|(\b\w+\b)|([^\w\s]+|\s+)/g;
+  const tokens: string[] = [];
+  let m: RegExpExecArray | null;
+
+  while ((m = regex.exec(line)) !== null) {
+    tokens.push(m[0]);
+  }
+
+  return tokens.length > 0 ? tokens : [line];
+}
+
+// Render individual token as a clean React span with syntax colors
+function renderToken(token: string, key: number) {
+  if (!token) return null;
+
+  // Comments (e.g. # comment or // comment)
+  if (token.startsWith('#') || token.startsWith('//')) {
+    return (
+      <span key={key} className="text-slate-400 italic">
+        {token}
+      </span>
+    );
+  }
+
+  // String literals (e.g. "hello", 'world')
+  if (
+    (token.startsWith('"') && token.endsWith('"')) ||
+    (token.startsWith("'") && token.endsWith("'")) ||
+    (token.startsWith('`') && token.endsWith('`'))
+  ) {
+    return (
+      <span key={key} className="text-emerald-300 font-medium">
+        {token}
+      </span>
+    );
+  }
+
+  // Python & JavaScript Keywords
+  if (
+    /^(def|class|return|import|from|async|await|const|let|var|function|if|else|elif|for|while|try|except|catch|finally|throw|raise|in|of|yield|pass|break|continue)$/.test(
+      token
+    )
+  ) {
+    return (
+      <span key={key} className="text-sky-400 font-bold">
+        {token}
+      </span>
+    );
+  }
+
+  // SQL Keywords
+  if (
+    /^(SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|EXTENSION|AND|OR|NOT|JOIN|LEFT|RIGHT|INNER|ON|LIMIT|RETURNING)$/i.test(
+      token
+    )
+  ) {
+    return (
+      <span key={key} className="text-purple-400 font-bold">
+        {token}
+      </span>
+    );
+  }
+
+  // Common built-in functions
+  if (/^(print|len|range|int|str|float|list|dict|set|console\.log)$/.test(token)) {
+    return (
+      <span key={key} className="text-amber-300 font-medium">
+        {token}
+      </span>
+    );
+  }
+
+  // Booleans and Null
+  if (/^(true|false|True|False|None|null|undefined)$/.test(token)) {
+    return (
+      <span key={key} className="text-rose-400 font-bold">
+        {token}
+      </span>
+    );
+  }
+
+  // Numbers
+  if (/^\d+$/.test(token)) {
+    return (
+      <span key={key} className="text-orange-300">
+        {token}
+      </span>
+    );
+  }
+
+  // Standard variables, punctuation, whitespace
+  return (
+    <span key={key} className="text-slate-100">
+      {token}
+    </span>
+  );
+}
+
 export const CodeBlock: React.FC<CodeBlockProps> = ({ inline, className, children, ...props }) => {
   const [copied, setCopied] = useState<boolean>(false);
 
   // Extract raw text content from children
   const rawCode = String(children).replace(/\n$/, '');
 
-  // If it's an inline code snippet (e.g., `vector(1536)`)
+  // Inline code snippet (e.g., `vector(1536)`)
   if (inline || !className) {
     return (
       <code
@@ -35,37 +142,6 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ inline, className, childre
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Basic syntax coloring helper for popular keywords
-  const highlightCode = (code: string, lang: string) => {
-    const lines = code.split('\n');
-    return lines.map((line, lineIdx) => {
-      // Tokens highlighting using regex replacements for display
-      let highlighted = line
-        // Comments (# or //)
-        .replace(/(#.*|\/\/.*)$/g, '<span class="text-slate-500 italic">$1</span>')
-        // Strings (double or single quotes)
-        .replace(/(["'])(?:(?=(\\?))\2.)*?\1/g, '<span class="text-amber-300">$1</span>')
-        // SQL keywords
-        .replace(/\b(SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP BY|ORDER BY|LIMIT|OFFSET|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|EXTENSION|IF NOT EXISTS|AND|OR|NOT|AS|RETURNING)\b/gi, '<span class="text-purple-400 font-bold">$1</span>')
-        // Python/JS keywords
-        .replace(/\b(def|class|return|import|from|async|await|const|let|var|function|if|else|elif|for|while|try|except|catch|finally|throw|raise|in|of|yield)\b/g, '<span class="text-blue-400 font-bold">$1</span>')
-        // Booleans & Null
-        .replace(/\b(true|false|True|False|None|null|undefined)\b/g, '<span class="text-rose-400 font-bold">$1</span>');
-
-      return (
-        <div key={lineIdx} className="table-row">
-          <span className="table-cell select-none pr-4 text-right text-[11px] text-slate-600 font-mono w-8">
-            {lineIdx + 1}
-          </span>
-          <span
-            className="table-cell whitespace-pre font-mono"
-            dangerouslySetToString={{ __html: highlighted || '&nbsp;' }}
-          />
-        </div>
-      );
-    });
-  };
-
   const getLanguageIcon = (lang: string) => {
     switch (lang) {
       case 'bash':
@@ -73,32 +149,35 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ inline, className, childre
       case 'shell':
       case 'powershell':
       case 'terminal':
+      case 'cmd':
         return <Terminal className="h-3.5 w-3.5 text-emerald-400" />;
       default:
-        return <Code2 className="h-3.5 w-3.5 text-blue-400" />;
+        return <Code2 className="h-3.5 w-3.5 text-sky-400" />;
     }
   };
 
+  const lines = rawCode.split('\n');
+
   return (
-    <div className="my-3 overflow-hidden rounded-xl border border-slate-700/80 bg-slate-900 shadow-md">
+    <div className="my-3.5 overflow-hidden rounded-xl border border-slate-700/80 bg-slate-950 shadow-lg">
       {/* Code Header Bar */}
-      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/70 px-4 py-2 text-xs">
+      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/90 px-4 py-2 text-xs">
         <div className="flex items-center gap-2">
           {getLanguageIcon(language)}
-          <span className="font-mono font-semibold uppercase tracking-wider text-slate-300 text-[11px]">
+          <span className="font-mono font-bold uppercase tracking-wider text-slate-300 text-[11px]">
             {language}
           </span>
         </div>
 
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+          className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-100 transition-colors"
           title="Copy code to clipboard"
         >
           {copied ? (
             <>
               <Check className="h-3.5 w-3.5 text-emerald-400" />
-              <span className="text-emerald-400 font-bold">Copied!</span>
+              <span className="text-emerald-400 font-semibold">Copied!</span>
             </>
           ) : (
             <>
@@ -109,11 +188,25 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ inline, className, childre
         </button>
       </div>
 
-      {/* Code Content */}
-      <div className="overflow-x-auto p-4 text-[13px] leading-relaxed text-slate-100 font-mono">
-        <div className="table w-full">
-          {highlightCode(rawCode, language)}
-        </div>
+      {/* Code Content Area */}
+      <div className="overflow-x-auto p-4 text-[13px] leading-relaxed text-slate-100 font-mono bg-slate-950">
+        <table className="w-full border-collapse">
+          <tbody>
+            {lines.map((line, lineIdx) => {
+              const tokens = parseLineToTokens(line);
+              return (
+                <tr key={lineIdx} className="hover:bg-slate-900/40 transition-colors">
+                  <td className="select-none pr-4 text-right text-[11px] text-slate-600 font-mono w-9 align-top">
+                    {lineIdx + 1}
+                  </td>
+                  <td className="whitespace-pre font-mono text-slate-100">
+                    {tokens.map((token, tIdx) => renderToken(token, tIdx))}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
