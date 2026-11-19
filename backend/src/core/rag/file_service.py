@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 STAGING_DIR = Path("./storage/staging")
 
 
+def build_chunks(path: Path, filename: str) -> List[Dict[str, Any]]:
+    """Parse a staged file and split it into chunks (shared by upload and re-chunking)."""
+    ext = path.suffix.lower()
+    if ext in (".csv", ".tsv"):
+        return parse_csv_to_chunks(path, filename)
+    if ext == ".xlsx":
+        return parse_xlsx_to_chunks(path, filename)
+    return doc_parser.chunk_markdown(doc_parser.parse_to_markdown(path, filename), filename)
+
+
 async def process_and_index_file(
     file_bytes: bytes,
     filename: str,
@@ -66,13 +76,7 @@ async def process_and_index_file(
 
     try:
         # 2. Parse file into chunks
-        if ext in (".csv", ".tsv"):
-            chunks = parse_csv_to_chunks(temp_path, filename)
-        elif ext == ".xlsx":
-            chunks = parse_xlsx_to_chunks(temp_path, filename)
-        else:
-            md_text = doc_parser.parse_to_markdown(temp_path, filename)
-            chunks = doc_parser.chunk_markdown(md_text, filename)
+        chunks = build_chunks(temp_path, filename)
 
         if not chunks:
             return False, "File parsing produced no indexable text chunks.", {}

@@ -110,3 +110,13 @@ async def reindex_embeddings_endpoint(user: UserClaims = Depends(require_admin))
     except Exception as e:
         logger.error(f"Re-index failed: {e}")
         raise HTTPException(status_code=500, detail=f"Re-index failed, nothing was changed: {e}")
+
+
+@router.post("/documents/rechunk")
+async def rechunk_documents_endpoint(user: UserClaims = Depends(require_admin)):
+    """Rebuild all document chunks from the stored original files (admin only)."""
+    from src.core.rag.rechunk import rechunk_all
+    try:
+        return {"success": True, **(await rechunk_all())}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))

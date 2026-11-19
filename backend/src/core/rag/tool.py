@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 from src.core.rag.hybrid import search_dense_vectors, search_bm25_lexical
 from src.core.rag.fusion import reciprocal_rank_fusion
 from src.core.rag.reranker import reranker
+from src.core.rag.ingest import strip_context_header
 from src.core.rag.embeddings import get_embedding, vector_literal
 from src.core.rag.index_admin import incompatibility_reason, is_index_compatible
 from src.core.db.session import db_manager
@@ -108,7 +109,7 @@ async def search_knowledge_base(
         citations.append({
             "document_name": p["filename"],
             "section_title": p.get("section_title"),
-            "snippet": p["chunk_text"][:250] + "...",
+            "snippet": strip_context_header(p["chunk_text"])[:250] + "...",
             "confidence_score": conf,
             "chunk_id": p["chunk_id"]
         })
