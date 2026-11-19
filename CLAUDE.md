@@ -14,8 +14,10 @@ Keep project-wide rules there; put only Claude-specific notes in this file.
 - **Never run `git add`, `git commit` or `git push`.** The developer reviews and commits manually.
   Read-only git commands (`git status`, `git diff`) are fine.
 - **Never commit or print secrets** from `.env` (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `GITHUB_PAT`).
-- **Vectors are 1536-dim:** cut embeddings to `[:1536]` and L2-normalise. Use `vector_literal()`
-  from `src/core/rag/embeddings.py` for `$n::vector` parameters.
+- **Embeddings come only from `src/core/rag/embeddings.py`** (`get_embedding` for queries,
+  `get_embeddings` for documents). Provider = `EMBEDDING_PROVIDER` (`qwen` | `gemini` | `openai`),
+  all 1024-dim. Never add a fallback to another provider (mixed vectors break search).
+  Use `vector_literal()` for `$n::vector` parameters.
 
 ## Spec Kit workflow (Claude integration)
 
@@ -38,6 +40,8 @@ The spec-driven commands are installed in `.claude/skills/`:
 | SSE chat route, session ownership checks | `backend/src/api/routes_chat.py` |
 | MCP client (stdio sessions, HTTP sessions, discovery) | `backend/src/core/mcp/manager.py` |
 | Knowledge search (embed → approved answers → hybrid → RRF → rerank) | `backend/src/core/rag/tool.py` |
+| Embedding providers (Qwen local / Gemini / OpenAI) | `backend/src/core/rag/embeddings.py` |
+| Index/model tracking and re-index | `backend/src/core/rag/index_admin.py`, `src/scripts/reindex_embeddings.py` |
 | Document parsing and chunking | `backend/src/core/rag/ingest.py`, `media_ingest.py` |
 | Upload pipeline | `backend/src/core/rag/file_service.py` |
 | Guardrails, redaction, untrusted-data fencing | `backend/src/core/security/guardrails.py` |
@@ -93,9 +97,18 @@ Then use the verification checkpoints in AGENTS.md section 5.
 
 - **A native Windows PostgreSQL service uses port 5432.** Docker's DB is mapped with
   `DB_PORT_BIND` (default `5432`). Binding `127.0.0.1:5432` fails; use e.g. `127.0.0.1:5433`.
+- **Switching embedding provider** needs a re-index (`python -m src.scripts.reindex_embeddings`);
+  `/health` → `embedding.index_compatible` shows whether it's needed. Qwen runs on CPU at about
+  1.2 s per 1500-char chunk (float32 is 3x faster than bfloat16 on this machine).
 - **Gemini models can return 503/429.** The default is `gemini-3.5-flash-lite` with fallbacks in
   `GEMINI_FALLBACK_MODELS`; a failing model is skipped for 60s (`llm.py`).
 - **The backend image is ~3.4 GB** because of the reranker and Docling (`INSTALL_ML=true`).
   Downloaded models are cached in the `hf_cache` volume.
+- **Docker Desktop sometimes reuses a stale `COPY . .` layer** for the frontend even after
+  source edits. If a change doesn't appear, rebuild with
+  `docker compose build --no-cache frontend && docker compose up -d --no-deps frontend`, then
+  check the served bundle (`curl -s localhost:3000/ | grep -o 'index-[^"]*\.js'`).
+- **The open chat lives in the URL** (`?chat=<session id>`, `useSSEChat.ts`), so a refresh keeps
+  the conversation. nginx sends `no-cache` for `index.html` and long-term caching for `/assets/`.
 - **`.gitignore` only ignores the top-level `/lib/`** so that `frontend/src/lib/` is tracked.
 - **Windows shell:** prefer forward slashes; `/tmp` is not visible to Windows `curl`.

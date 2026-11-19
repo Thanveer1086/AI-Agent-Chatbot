@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from src.core.security.auth import get_current_user, require_admin, UserClaims
 from src.core.db.session import db_manager
 from src.core.rag.embeddings import get_embedding, vector_literal
+from src.core.rag import index_admin
+from src.core.rag.index_admin import incompatibility_reason, is_index_compatible
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Admin Review & Feedback"])
@@ -56,8 +58,10 @@ async def override_answer_endpoint(
 ):
     """Publish an authoritative approved answer into the QA expansion vector collection."""
     # Generate embedding for the approved Q&A
+    if not is_index_compatible():
+        raise HTTPException(status_code=409, detail=f"Embedding index mismatch: {incompatibility_reason()} Re-index first.")
     try:
-        dense_vec = await get_embedding(request.question_text)
+        dense_vec = await get_embedding(request.question_text, is_query=True)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Embedding service unavailable: {e}")
     vec_str = vector_literal(dense_vec)
@@ -90,3 +94,19 @@ async def get_master_data_endpoint(
         "applications": [{"id": r["id"], "name": r["name"], "description": r["description"]} for r in apps],
         "document_types": [{"id": r["id"], "name": r["name"]} for r in doc_types]
     }
+
+
+@router.get("/embeddings/status")
+async def embedding_status_endpoint(user: UserClaims = Depends(get_current_user)):
+    """Which embedding provider is configured, which one built the stored vectors, and whether they match."""
+    return await index_admin.check_index()
+
+
+@router.post("/embeddings/reindex")
+async def reindex_embeddings_endpoint(user: UserClaims = Depends(require_admin)):
+    """Re-embed every chunk and approved answer with the configured provider (admin only)."""
+    try:
+        return {"success": True, **(await index_admin.reindex_all())}
+    except Exception as e:
+        logger.error(f"Re-index failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Re-index failed, nothing was changed: {e}")

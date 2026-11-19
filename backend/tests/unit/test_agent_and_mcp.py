@@ -116,3 +116,59 @@ async def test_planner_caps_reworded_knowledge_searches(monkeypatch):
     ]
     _, calls = await nodes.llm_plan_step([HumanMessage(content="q")], 1, history=history)
     assert calls == []
+
+
+async def test_planner_retries_once_on_broken_json(monkeypatch):
+    from langchain_core.messages import HumanMessage
+
+    replies = iter([
+        '{"thought": "the "Only LightReach" banner", "tool_calls": []}',  # unescaped quotes
+        '{"thought": "search docs", "standalone_query": "banner rules", '
+        '"tool_calls": [{"tool": "knowledge_base_search", "arguments": {}}]}',
+    ])
+    seen_messages = []
+
+    async def fake_complete(messages, **kwargs):
+        seen_messages.append(messages)
+        return next(replies)
+
+    monkeypatch.setattr(llm, "active_provider", lambda: "gemini")
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    monkeypatch.setattr(nodes.mcp_manager, "discovered_tools", {"mcp_x_y": {"original_tool": {}}})
+    thought, calls = await nodes.llm_plan_step([HumanMessage(content="When does the banner appear?")], 1)
+
+    assert len(seen_messages) == 2
+    assert "not valid JSON" in seen_messages[1][-1]["content"]  # the retry explains the problem
+    assert [c["name"] for c in calls] == ["knowledge_base_search"]
+    assert calls[0]["arguments"]["query"] == "banner rules"
+
+
+async def test_fallback_searches_documents_when_planner_fails(monkeypatch):
+    from langchain_core.messages import HumanMessage
+
+    async def broken(*args, **kwargs):
+        return "not json at all"
+
+    async def docs_exist():
+        return True
+
+    monkeypatch.setattr(llm, "active_provider", lambda: "gemini")
+    monkeypatch.setattr(llm, "complete", broken)
+    monkeypatch.setattr(nodes, "has_enabled_documents", docs_exist)
+    monkeypatch.setattr(nodes.mcp_manager, "discovered_tools", {"mcp_x_y": {"original_tool": {}}})
+
+    # "banner" matches none of the keyword rules, but documents exist -> search anyway
+    _, calls = await nodes.llm_plan_step([HumanMessage(content="When does the Only LightReach Financing banner appear?")], 1)
+    assert [c["name"] for c in calls] == ["knowledge_base_search"]
+
+    # Small talk still skips the search
+    _, calls = await nodes.llm_plan_step([HumanMessage(content="thanks!")], 1)
+    assert calls == []
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("hi", True), ("Hello!", True), ("thank you", True), ("good morning", True),
+    ("hi, what is our leave policy?", False), ("When does the banner appear?", False),
+])
+def test_small_talk_detection(text, expected):
+    assert nodes.is_small_talk(text) is expected

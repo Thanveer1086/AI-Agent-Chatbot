@@ -141,6 +141,62 @@ PLANNER_SYSTEM = (
 )
 
 
+PLANNER_JSON_ATTEMPTS = 2
+
+
+async def _plan_with_retry(prompt: str) -> Dict[str, Any]:
+    """Ask the planner for JSON; if the reply is not valid JSON, retry once with a correction.
+
+    Small models (e.g. Flash-Lite) occasionally emit malformed JSON such as an unescaped
+    quote. One corrective retry fixes almost all of these without falling back to the
+    much weaker keyword heuristic.
+    """
+    messages = [{"role": "user", "content": prompt}]
+    last_error: Optional[Exception] = None
+    for attempt in range(1, PLANNER_JSON_ATTEMPTS + 1):
+        raw = await llm.complete(
+            messages,
+            system=PLANNER_SYSTEM,
+            temperature=0.0,
+            json_mode=True,
+            model=settings.PLANNER_MODEL,
+        )
+        try:
+            return llm.parse_json_object(raw)
+        except ValueError as e:  # json.JSONDecodeError is a ValueError
+            last_error = e
+            logger.warning(f"Planner returned invalid JSON (attempt {attempt}/{PLANNER_JSON_ATTEMPTS}): {e}")
+            messages = messages + [
+                {"role": "assistant", "content": (raw or "")[:4000]},
+                {"role": "user", "content": (
+                    f"That reply was not valid JSON ({e}). Reply again with ONLY one valid JSON object "
+                    "in the required shape. Escape any double quotes inside strings as \\\" and do not "
+                    "add text before or after the object."
+                )},
+            ]
+    raise ValueError(f"Planner JSON invalid after {PLANNER_JSON_ATTEMPTS} attempts: {last_error}")
+
+
+SMALL_TALK = re.compile(
+    r"^\s*(hi|hello|hey|hii+|thanks?|thank you|thx|ok(ay)?|bye|good (morning|afternoon|evening|night)|"
+    r"how are you|who are you|what can you do)\b[\s!.?]*$",
+    re.IGNORECASE,
+)
+
+
+def is_small_talk(query: str) -> bool:
+    return bool(SMALL_TALK.match(query or ""))
+
+
+async def has_enabled_documents() -> bool:
+    try:
+        async with db_manager.acquire() as conn:
+            return bool(await conn.fetchval("SELECT EXISTS (SELECT 1 FROM uploaded_files WHERE is_enabled)"))
+    except Exception as e:
+        logger.warning(f"Could not check for enabled documents: {e}")
+        return False
+
+
 async def llm_plan_step(
     messages: List[BaseMessage],
     application_id: int = 1,
@@ -178,14 +234,7 @@ async def llm_plan_step(
 
     if llm.active_provider():
         try:
-            raw = await llm.complete(
-                [{"role": "user", "content": prompt}],
-                system=PLANNER_SYSTEM,
-                temperature=0.0,
-                json_mode=True,
-                model=settings.PLANNER_MODEL,
-            )
-            parsed = llm.parse_json_object(raw)
+            parsed = await _plan_with_retry(prompt)
             thought = str(parsed.get("thought") or "Planning next step.")
             standalone = str(parsed.get("standalone_query") or query).strip() or query
 
@@ -230,11 +279,17 @@ async def llm_plan_step(
         return "Proceeding to answer with the evidence gathered.", []
 
     needs_kb, matched_hint = await check_internal_search_needed(query)
+    reason = "User query relates to internal documentation, meeting notes, or uploaded files."
+    if not needs_kb and not is_small_talk(query) and await has_enabled_documents():
+        # The keyword rules can't recognise every company-specific question (e.g. "When does
+        # the X banner appear?"). A search is cheap and harmless when nothing matches, while
+        # skipping it means a confident answer that ignores the user's own documents.
+        needs_kb = True
+        reason = "AI planner unavailable; documents are available, so searching them before answering."
     if needs_kb:
         search_query = f"{query} {matched_hint}" if matched_hint else query
         return (
-            "User query relates to internal documentation, meeting notes, or uploaded files. "
-            "Dispatching knowledge base search tool.",
+            f"{reason} Dispatching knowledge base search tool.",
             [{
                 "call_id": f"call_rag_{time.time_ns()}",
                 "name": KNOWLEDGE_TOOL,

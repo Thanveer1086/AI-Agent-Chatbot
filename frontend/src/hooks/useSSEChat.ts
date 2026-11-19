@@ -2,6 +2,25 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ChatMessage, Citation, ThoughtStep, ToolTrace, ChatSession, ToolApproval, ApprovalStatus } from '../types/chat';
 import { apiFetch, errorMessage } from '../lib/api';
 
+const CHAT_PARAM = 'chat';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The open conversation id from the address bar (?chat=<uuid>), if valid. */
+function getChatFromUrl(): string | null {
+  const id = new URLSearchParams(window.location.search).get(CHAT_PARAM);
+  return id && UUID_RE.test(id) ? id : null;
+}
+
+/** Put the open conversation in the address bar so refresh, Back/Forward and bookmarks keep it. */
+function setChatInUrl(id: string | null, mode: 'push' | 'replace'): void {
+  const url = new URL(window.location.href);
+  if ((url.searchParams.get(CHAT_PARAM) || null) === id) return;
+  if (id) url.searchParams.set(CHAT_PARAM, id);
+  else url.searchParams.delete(CHAT_PARAM);
+  if (mode === 'push') window.history.pushState({}, '', url);
+  else window.history.replaceState({}, '', url);
+}
+
 export function useSSEChat(applicationId: number = 1) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
@@ -29,15 +48,21 @@ export function useSSEChat(applicationId: number = 1) {
   }, [fetchSessions]);
 
   // Select an old conversation from history
-  const selectSession = useCallback(async (id: string) => {
+  const selectSession = useCallback(async (id: string, options: { fromUrl?: boolean } = {}) => {
     if (isStreaming) return;
     setSessionId(id);
+    if (!options.fromUrl) setChatInUrl(id, 'push');
     setIsLoadingHistory(true);
     try {
       const res = await apiFetch(`/api/chat/sessions/${id}/messages`);
       if (res.ok) {
         const msgs = await res.json();
         setMessages(msgs);
+      } else {
+        // Deleted, not yours, or a bad link: fall back to a fresh chat
+        setSessionId(null);
+        setMessages([]);
+        setChatInUrl(null, 'replace');
       }
     } catch (err) {
       console.error('Failed to load messages for session:', err);
@@ -51,7 +76,27 @@ export function useSSEChat(applicationId: number = 1) {
     if (isStreaming) return;
     setSessionId(null);
     setMessages([]);
+    setChatInUrl(null, 'push');
   }, [isStreaming]);
+
+  // Reopen the chat named in the address bar on page load (so a refresh keeps the same
+  // conversation) and follow the browser's Back/Forward buttons.
+  const selectSessionRef = useRef(selectSession);
+  selectSessionRef.current = selectSession;
+  useEffect(() => {
+    const openFromUrl = () => {
+      const id = getChatFromUrl();
+      if (id) {
+        selectSessionRef.current(id, { fromUrl: true });
+      } else {
+        setSessionId(null);
+        setMessages([]);
+      }
+    };
+    if (getChatFromUrl()) openFromUrl();
+    window.addEventListener('popstate', openFromUrl);
+    return () => window.removeEventListener('popstate', openFromUrl);
+  }, []);
 
   // Delete an old chat session
   const deleteSession = useCallback(async (id: string, e?: React.MouseEvent) => {
@@ -62,6 +107,7 @@ export function useSSEChat(applicationId: number = 1) {
       if (sessionId === id) {
         setSessionId(null);
         setMessages([]);
+        setChatInUrl(null, 'replace');
       }
     } catch (err) {
       console.error('Failed to delete session:', err);
@@ -180,6 +226,8 @@ export function useSSEChat(applicationId: number = 1) {
 
             if (eventType === 'done' && data.session_id) {
               setSessionId(data.session_id);
+              // A brand-new chat now has an id: record it so a refresh reopens this chat
+              setChatInUrl(data.session_id, 'replace');
               fetchSessions();
             }
 

@@ -58,11 +58,13 @@ async def _fetch_metrics() -> dict:
                 (SELECT count(*) FROM primary_vector_chunks) AS total_chunks,
                 (SELECT count(*) FROM approved_answers) AS approved_answers,
                 (SELECT count(*) FROM chat_sessions) AS chat_sessions,
-                current_setting('server_version') AS server_version;
+                current_setting('server_version') AS server_version,
+                (SELECT a.atttypmod FROM pg_attribute a
+                   WHERE a.attrelid = 'primary_vector_chunks'::regclass AND a.attname = 'dense_vector') AS vector_dimension,
+                (SELECT provider || ' / ' || model FROM embedding_index_meta WHERE id = 1) AS embedding_model;
             """
         )
         metrics = dict(row)
-        metrics["vector_dimension"] = 1536
         metrics["database_engine"] = f"PostgreSQL {metrics.pop('server_version')} (pgvector)"
         return metrics
     finally:

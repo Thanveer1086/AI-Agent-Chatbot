@@ -8,6 +8,7 @@ from src.core.db.blob import storage_client
 from src.core.rag.ingest import doc_parser, SUPPORTED_EXTENSIONS
 from src.core.rag.media_ingest import parse_csv_to_chunks, parse_xlsx_to_chunks
 from src.core.rag.embeddings import get_embeddings, vector_literal
+from src.core.rag.index_admin import REINDEX_COMMAND, ensure_meta_for_new_index, incompatibility_reason, is_index_compatible
 from src.core.security.paths import safe_filename
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,12 @@ async def process_and_index_file(
         return False, (
             f"Unsupported file type '{ext or 'none'}'. "
             f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}."
+        ), {}
+
+    if not is_index_compatible():
+        return False, (
+            "Uploads are paused: the stored vectors were made with a different embedding model "
+            f"({incompatibility_reason()}). Run the re-index command first: {REINDEX_COMMAND}"
         ), {}
 
     # Refuse duplicates up front, before touching storage: the original file's blob
@@ -103,6 +110,7 @@ async def process_and_index_file(
                     for c, vec in zip(chunks, vectors)
                 ])
 
+        await ensure_meta_for_new_index()
         logger.info(f"Successfully processed and indexed '{filename}': {len(chunks)} chunks.")
         return True, "File indexed successfully.", {
             "file_id": inserted_file_id,

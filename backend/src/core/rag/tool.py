@@ -1,15 +1,35 @@
 """Callable Agent Tool: search_knowledge_base."""
 import asyncio
+import math
 import logging
 from typing import Dict, Any, List
 from src.core.rag.hybrid import search_dense_vectors, search_bm25_lexical
 from src.core.rag.fusion import reciprocal_rank_fusion
 from src.core.rag.reranker import reranker
 from src.core.rag.embeddings import get_embedding, vector_literal
+from src.core.rag.index_admin import incompatibility_reason, is_index_compatible
 from src.core.db.session import db_manager
 from src.config import settings
 
 logger = logging.getLogger(__name__)
+
+def relevance_score(passage: Dict[str, Any], rrf_k: int = 60) -> float:
+    """One consistent 0.0-1.0 relevance value for the UI, whatever produced the passage.
+
+    1. Reranker ran: the CrossEncoder outputs a raw logit (about -10..+10). It is trained
+       as a relevant / not-relevant classifier, so sigmoid(logit) is its relevance probability.
+    2. No reranker, found by vector search: cosine similarity, clamped to 0..1.
+    3. Keyword-only, no reranker: RRF score divided by the best possible RRF score
+       (rank 1 in both lists = 2 / (k + 1)).
+    """
+    if passage.get("rerank_score") is not None:
+        value = 1.0 / (1.0 + math.exp(-float(passage["rerank_score"])))
+    elif passage.get("retrieval_type") == "dense" and passage.get("score") is not None:
+        value = float(passage["score"])
+    else:
+        value = float(passage.get("fused_score", 0.0)) / (2.0 / (rrf_k + 1))
+    return round(min(1.0, max(0.0, value)), 2)
+
 
 async def resolve_application_name(application_id: int) -> str:
     """Resolve application ID to its canonical name."""
@@ -33,7 +53,11 @@ async def search_knowledge_base(
     # 1. Embed the query once; if embeddings are unavailable, keyword search still runs.
     query_vec = None
     try:
-        query_vec = await get_embedding(query)
+        if not is_index_compatible():
+            # Stored vectors come from a different embedding model: comparing them with
+            # this query vector would give meaningless scores, so use keyword search only.
+            raise RuntimeError(incompatibility_reason())
+        query_vec = await get_embedding(query, is_query=True)
     except Exception as e:
         logger.warning(f"Query embedding unavailable ({e}); using keyword search only.")
 
@@ -79,15 +103,7 @@ async def search_knowledge_base(
     passages_text = []
 
     for idx, p in enumerate(final_passages, start=1):
-        # Calculate human-intuitive confidence score (preferring dense cosine similarity 0.0-1.0)
-        raw_sim = p.get("score")
-        if raw_sim is not None and 0.1 <= float(raw_sim) <= 1.0:
-            conf = round(float(raw_sim), 2)
-        elif p.get("rerank_score") is not None:
-            conf = round(float(p["rerank_score"]), 2)
-        else:
-            # Calibrate raw RRF rank score (typically 0.016 - 0.033) into a 0.65 - 0.95 confidence range
-            conf = round(min(0.95, max(0.65, float(p.get("fused_score", 0.02)) * 26.0)), 2)
+        conf = relevance_score(p, settings.RRF_K)
 
         citations.append({
             "document_name": p["filename"],

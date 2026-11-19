@@ -188,3 +188,15 @@ def test_pending_approvals_are_listed(client):
         assert approval_id in [a["approval_id"] for a in res.json()["approvals"]]
     finally:
         _delete_session(client, session_id)
+
+
+def test_health_reports_embedding_index(client):
+    emb = client.get("/health").json()["embedding"]
+    assert emb["provider"] in {"openai", "gemini", "qwen"}
+    assert emb["index_compatible"] is True
+
+
+def test_embedding_status_endpoint(client):
+    status = client.get("/api/embeddings/status").json()
+    assert status["compatible"] is True
+    assert set(status["column_dimensions"].values()) == {status["configured"]["dimension"]}

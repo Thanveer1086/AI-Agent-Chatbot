@@ -149,3 +149,12 @@ CREATE TABLE IF NOT EXISTS tool_approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_approvals_user_status ON tool_approvals(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_tool_approvals_session ON tool_approvals(session_id);
+
+-- 7. Which embedding provider/model/dimension produced the stored vectors (single row)
+CREATE TABLE IF NOT EXISTS embedding_index_meta (
+    id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    provider VARCHAR(50) NOT NULL,
+    model VARCHAR(255) NOT NULL,
+    dimension INT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);

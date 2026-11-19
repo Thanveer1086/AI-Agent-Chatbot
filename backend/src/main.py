@@ -13,6 +13,8 @@ from src.api.routes_mcp import router as mcp_router
 from src.api.routes_approvals import router as approvals_router
 from src.core.mcp.manager import mcp_manager
 from src.core.rag.reranker import reranker
+from src.core.rag import index_admin
+from src.core.rag.embeddings import load_local_model
 
 # Configure structured logging
 logging.basicConfig(
@@ -27,9 +29,14 @@ async def warm_up() -> None:
         await mcp_manager.discover_tools()
     except Exception as e:
         logger.warning(f"MCP warm-up discovery failed: {e}")
+    if settings.EMBEDDING_PROVIDER == "qwen":
+        try:
+            await asyncio.to_thread(load_local_model)
+        except Exception as e:
+            logger.warning(f"Local embedding model warm-up failed: {e}")
     if settings.RERANKING_ENABLED:
         await asyncio.to_thread(reranker._get_model)
-    logger.info("Warm-up complete (MCP tools discovered, reranker loaded).")
+    logger.info("Warm-up complete (MCP tools discovered, models loaded).")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,6 +44,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting AI-Agent-ChatBot service...")
     try:
         await db_manager.connect()
+        await index_admin.check_index()
     except Exception as e:
         logger.warning(f"Database connection deferred or failed on startup: {e}")
 
@@ -82,5 +90,10 @@ async def health_check():
         "status": "healthy",
         "service": "AI-Agent-ChatBot",
         "api_used": settings.API_USED,
-        "dev_bypass": settings.DEV_AUTH_BYPASS
+        "dev_bypass": settings.DEV_AUTH_BYPASS,
+        "embedding": {
+            **index_admin.current_identity(),
+            "index_compatible": index_admin.is_index_compatible(),
+            "reason": index_admin.incompatibility_reason(),
+        },
     }

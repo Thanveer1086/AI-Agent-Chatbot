@@ -1,6 +1,6 @@
 """Application configuration and environment settings validator."""
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from typing import List, Literal, Optional
 
 class Settings(BaseSettings):
@@ -24,9 +24,19 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: int = Field(default=30, ge=5, le=300)
 
     # Embeddings
-    EMBEDDING_PROVIDER: Literal["openai", "gemini"] = "gemini"
-    EMBEDDING_MODEL: str = "gemini-embedding-2"
-    EXPECTED_EMBEDDING_DIM: int = 1536
+    # Switch provider by changing ONE value, then run the re-index command:
+    #   docker compose exec backend python -m src.scripts.reindex_embeddings
+    #   openai -> OpenAI API (needs OPENAI_API_KEY)
+    #   gemini -> Google Gemini API (needs GEMINI_API_KEY)
+    #   qwen   -> local Hugging Face model, runs inside the backend (free, no key)
+    EMBEDDING_PROVIDER: Literal["openai", "gemini", "qwen"] = "qwen"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-2"
+    QWEN_EMBEDDING_MODEL: str = "Qwen/Qwen3-Embedding-0.6B"
+    # One shared vector size for every provider (Qwen3-0.6B max is 1024; Gemini and
+    # OpenAI text-embedding-3 can output any size up to their maximum).
+    EXPECTED_EMBEDDING_DIM: int = Field(default=1024, ge=64, le=2000)
+    QWEN_BATCH_SIZE: int = Field(default=16, ge=1, le=128)
     # Only for offline development: store hash-based fake vectors when no key is set.
     # Keep False in real use, otherwise search quality is silently destroyed.
     ALLOW_MOCK_EMBEDDINGS: bool = False
@@ -79,6 +89,26 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip() and o.strip() != "*"]
+
+    @property
+    def embedding_model_name(self) -> str:
+        """The model used by the active embedding provider."""
+        return {
+            "openai": self.OPENAI_EMBEDDING_MODEL,
+            "gemini": self.GEMINI_EMBEDDING_MODEL,
+            "qwen": self.QWEN_EMBEDDING_MODEL,
+        }[self.EMBEDDING_PROVIDER]
+
+    @model_validator(mode="after")
+    def _check_embedding_dim(self):
+        limits = {"qwen": 1024, "gemini": 3072, "openai": 3072}
+        limit = limits[self.EMBEDDING_PROVIDER]
+        if self.EXPECTED_EMBEDDING_DIM > limit:
+            raise ValueError(
+                f"EXPECTED_EMBEDDING_DIM={self.EXPECTED_EMBEDDING_DIM} is larger than the "
+                f"{self.EMBEDDING_PROVIDER} maximum ({limit})."
+            )
+        return self
 
     @property
     def gemini_models(self) -> List[str]:

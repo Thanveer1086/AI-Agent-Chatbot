@@ -11,7 +11,7 @@
 ### Key Capabilities:
 - 🧠 **Autonomous Planning & Reasoning Loop**: Powered by LangGraph StateGraph (`Plan` $\rightarrow$ `Tool Execution` $\rightarrow$ `Reflection` $\rightarrow$ `Synthesis`).
 - 🔌 **Model Context Protocol (MCP) Gateway**: Connects to both local `stdio` subprocesses and remote cloud `HTTP/SSE` tools (including **GitHub Copilot MCP**, **Database MCP**, and **Filesystem MCP**).
-- 📚 **Advanced Enterprise RAG**: Ingests Word (`.docx`), PDF, and Markdown files. Uses **`gemini-embedding-2`** dense vectors, PostgreSQL `pgvector` HNSW index, BM25 full-text lexical search (`tsvector`), and Reciprocal Rank Fusion (RRF).
+- 📚 **Advanced Enterprise RAG**: Ingests Word (`.docx`), PDF, and Markdown files. Uses switchable dense embeddings (**local Qwen3-Embedding-0.6B** by default, or Gemini / OpenAI), PostgreSQL `pgvector` HNSW index, BM25 full-text lexical search (`tsvector`), and Reciprocal Rank Fusion (RRF).
 - 🎨 **Real-Time Generative UI**: Built with React, Vite, and TailwindCSS. Features real-time SSE token streaming, expandable thought step traces, tool execution badges with millisecond latencies, and interactive source citations.
 - 🗄️ **Integrated Database Web UI**: Built-in browser database manager (Adminer) to inspect tables, chunk records, and raw vector embeddings.
 
@@ -94,9 +94,10 @@ GEMINI_MODEL=gemini-3.5-flash
 # ==============================================================================
 # Vector Embeddings
 # ==============================================================================
-EMBEDDING_PROVIDER=gemini
-EMBEDDING_MODEL=gemini-embedding-2
-EXPECTED_EMBEDDING_DIM=1536
+# openai | gemini | qwen (local, free). Re-index after switching:
+#   docker compose exec backend python -m src.scripts.reindex_embeddings
+EMBEDDING_PROVIDER=qwen
+EXPECTED_EMBEDDING_DIM=1024
 
 # ==============================================================================
 # Database & Storage
@@ -147,7 +148,7 @@ List all my repository names
    ```text
    Please give the overall explanation about netspectionve sync meeting 02-11
    ```
-- **What happens:** The agent fuzzy-matches the title against active database records, calls `knowledge_base_search`, retrieves top semantic chunks via `gemini-embedding-2` vector similarity, and synthesizes a structured summary with clickable citation badges.
+- **What happens:** The agent fuzzy-matches the title against active database records, calls `knowledge_base_search`, retrieves top semantic chunks via vector similarity, and synthesizes a structured summary with clickable citation badges.
 
 ### Test 3: System Database Inspection
 Ask:

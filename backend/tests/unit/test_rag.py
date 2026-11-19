@@ -72,3 +72,27 @@ def test_rrf_prefers_documents_found_by_both_retrievers():
     fused = reciprocal_rank_fusion([dense, bm25], k=60)
     assert [d["chunk_id"] for d in fused][0] == "b"
     assert {d["chunk_id"] for d in fused} == {"a", "b", "c"}
+
+
+def test_relevance_score_is_always_between_0_and_1():
+    from src.core.rag.tool import relevance_score
+
+    # Raw CrossEncoder logits (the -367% / -460% bug) become probabilities
+    assert relevance_score({"rerank_score": -4.6}) == 0.01
+    assert relevance_score({"rerank_score": -3.67}) == 0.02
+    assert relevance_score({"rerank_score": 0.0}) == 0.5
+    assert relevance_score({"rerank_score": 6.0}) == 1.0
+    # Vector-only results use cosine similarity
+    assert relevance_score({"retrieval_type": "dense", "score": 0.55}) == 0.55
+    # Keyword-only without reranker: share of the best possible fused score
+    assert relevance_score({"retrieval_type": "bm25", "score": 0.05, "fused_score": 1 / 61}, rrf_k=60) == 0.5
+    for p in ({"rerank_score": -50}, {"rerank_score": 50}, {"retrieval_type": "dense", "score": -0.2}):
+        assert 0.0 <= relevance_score(p) <= 1.0
+
+
+def test_relevance_order_matches_reranker_order():
+    from src.core.rag.tool import relevance_score
+
+    logits = [2.1, -0.4, -3.7, -4.6]
+    scores = [relevance_score({"rerank_score": s}) for s in logits]
+    assert scores == sorted(scores, reverse=True)
